@@ -217,6 +217,7 @@ class _Backend:
 
     # _inner_compile adds a lazy optimizer after Inductor has produced and loaded one generated Python wrapper.
     def _inner_compile(self, graph_module, example_inputs, **kwargs):
+        import torch
         from torch._inductor.compile_fx import compile_fx_inner
         from torch._inductor.output_code import (
             CompiledFxGraph,
@@ -227,6 +228,32 @@ class _Backend:
         if not isinstance(compiled, CompiledFxGraph):
             return compiled
         if "triton_" not in compiled.source_code:
+            return compiled
+        # Cache identity and remote serialization represent exactly one CUDA target.
+        if set(compiled.device_types) != {"cuda"} or len(compiled.device_idxs) != 1:
+            warnings.warn(
+                "Tilesmith left a mixed-device or multi-GPU graph on ordinary Inductor",
+                stacklevel=2,
+            )
+            return compiled
+
+        # One runtime shape cannot validate a replacement across a symbolic range.
+        dynamic_inputs = False
+        for value in example_inputs:
+            if isinstance(value, torch.SymInt):
+                dynamic_inputs = True
+                break
+            if torch.is_tensor(value):
+                dynamic_inputs = any(
+                    isinstance(size, torch.SymInt) for size in value.shape
+                )
+                if dynamic_inputs:
+                    break
+        if dynamic_inputs:
+            warnings.warn(
+                "Tilesmith left a dynamic-shape graph on ordinary Inductor",
+                stacklevel=2,
+            )
             return compiled
         if compiled.mutated_input_idxs:
             warnings.warn(
@@ -520,7 +547,12 @@ class _Evaluator:
                 torch.random.set_rng_state(cpu_state)
                 torch.cuda.set_rng_state_all(cuda_states)
                 actual = candidate(list(self._inputs(variant)))
-                torch.testing.assert_close(actual, expected, equal_nan=True)
+                torch.testing.assert_close(
+                    actual,
+                    expected,
+                    equal_nan=True,
+                    check_stride=True,
+                )
             torch.cuda.synchronize(self.device)
             report = self._benchmark(candidate)
             report["chip"] = self.chip

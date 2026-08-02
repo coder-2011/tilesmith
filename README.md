@@ -35,8 +35,8 @@ output = optimized_model(x)
 `tilesmith.compile` returns a normal `torch.compile` callable, so PyTorch keeps
 the model's output structure and autograd integration. Compilation remains
 lazy: the first real call optimizes each eligible forward or backward Inductor
-graph. Input-mutating, non-Triton, and wrapped graphs safely stay on ordinary
-Inductor.
+graph. Dynamic-shape, mixed-device, multi-GPU, input-mutating, non-Triton, and
+wrapped graphs safely stay on ordinary Inductor.
 
 ## Remote benchmarks
 

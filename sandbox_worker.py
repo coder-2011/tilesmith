@@ -122,6 +122,7 @@ def _check(torch, workload, kernel):
                 _outputs(actual),
                 _outputs(expected),
                 atol=atol,
+                check_stride=True,
                 rtol=rtol,
                 equal_nan=True,
             )
@@ -156,7 +157,12 @@ def _check_generated(torch, baseline, candidate, inputs):
             torch.random.set_rng_state(cpu_state)
             torch.cuda.set_rng_state_all(cuda_states)
             actual = candidate(list(_generated_inputs(torch, inputs, variant)))
-            torch.testing.assert_close(actual, expected, equal_nan=True)
+            torch.testing.assert_close(
+                actual,
+                expected,
+                equal_nan=True,
+                check_stride=True,
+            )
     torch.cuda.synchronize()
 
 
