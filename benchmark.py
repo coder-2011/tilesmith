@@ -15,6 +15,21 @@ APP_NAME = "tilesmith"
 FUNCTION_NAME = "run_gpu"
 
 
+# _default_skills finds the user's relevant Codex guidance without making it a repository dependency.
+def _default_skills():
+    skill_root = Path.home() / ".codex" / "skills"
+    cuda_root = skill_root / "high-performance-cuda"
+    candidates = [
+        skill_root / "check-normal" / "SKILL.md",
+        cuda_root / "SKILL.md",
+        cuda_root / "references" / "core-principles.md",
+        cuda_root / "references" / "autotuning-and-benchmarking.md",
+        cuda_root / "references" / "numerical-correctness.md",
+        cuda_root / "references" / "triton-and-codegen.md",
+    ]
+    return [str(path) for path in candidates if path.is_file()]
+
+
 # _remote invokes the deployed H100 evaluator without embedding Modal credentials.
 def _remote(profile, action, workload_source, kernel_source):
     os.environ["MODAL_PROFILE"] = profile
@@ -79,6 +94,7 @@ def _run(args):
 
     workload_path = Path(args.workload).resolve()
     workload_source = workload_path.read_text(encoding="utf-8")
+    skills = args.skill if args.skill is not None else _default_skills()
     _deploy(args.profile)
     extracted = _remote(args.profile, "extract", workload_source, "")
     source = extracted.pop("source")
@@ -118,6 +134,8 @@ def _run(args):
             "-timeout",
             "20m",
         ]
+        for skill in skills:
+            command.extend(["-skill", skill])
         process = subprocess.Popen(
             command,
             cwd=ROOT,
@@ -135,12 +153,16 @@ def _run(args):
 
         agent_output = "".join(output)
         attempts = re.findall(r"^attempt \d+:", agent_output, flags=re.MULTILINE)
+        searches = re.findall(r"^research \d+: (\d+) web search calls$", agent_output, flags=re.MULTILINE)
         installed = re.search(
             r"installed ([0-9.]+)% improvement: ([0-9.eE+-]+) -> ([0-9.eE+-]+)",
             agent_output,
         )
         if len(attempts) != args.attempts:
             raise RuntimeError(f"agent completed {len(attempts)} of {args.attempts} attempts")
+        search_count = sum(int(count) for count in searches)
+        if search_count < 1:
+            raise RuntimeError("agent did not use hosted web search")
         if installed is None:
             raise RuntimeError("agent did not catch the controlled optimization")
 
@@ -156,6 +178,8 @@ def _run(args):
                     "confirmed_ms": float(installed.group(3)),
                     "improvement": gain,
                     "model_attempts": len(attempts),
+                    "skill_files": len(skills),
+                    "web_searches": search_count,
                 },
                 sort_keys=True,
             )
@@ -174,6 +198,7 @@ def _parse_args():
     run_parser.add_argument("--launches", type=int, default=4)
     run_parser.add_argument("--model", default=os.environ.get("TILESMITH_MODEL", "gpt-5.4"))
     run_parser.add_argument("--profile", default=os.environ.get("MODAL_PROFILE", "tilesmith-h100"))
+    run_parser.add_argument("--skill", action="append", help="trusted skill or reference file; repeatable")
     run_parser.add_argument("--workload", default=str(ROOT / "workload.py"))
 
     evaluate_parser = commands.add_parser("evaluate", help="evaluate one agent candidate")
