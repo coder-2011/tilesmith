@@ -555,12 +555,13 @@ def _write_cache(cache_dir, cache_key, source):
     return artifact
 
 
-# _load_call imports one accepted source file with the constants Inductor attached to the original module.
-def _load_call(path, constants):
+# _load_call imports accepted source with Inductor constants and an optional precomputed cache key.
+def _load_call(path, constants, source_hash=None):
     from torch._inductor.codecache import PyCodeCache, code_hash
 
-    source = path.read_text(encoding="utf-8")
-    module = PyCodeCache.load_by_key_path(code_hash(source), str(path), attrs=constants)
+    if source_hash is None:
+        source_hash = code_hash(path.read_bytes())
+    module = PyCodeCache.load_by_key_path(source_hash, str(path), attrs=constants)
     return module.call
 
 
@@ -604,13 +605,15 @@ class _Evaluator:
         import torch
         from torch._inductor.codecache import code_hash
 
-        if len(source.encode()) > MAX_SOURCE_BYTES:
+        source_bytes = source.encode()
+        if len(source_bytes) > MAX_SOURCE_BYTES:
             raise ValueError("candidate source exceeds 64 MiB")
-        candidate_path = Path(self.directory.name) / f"{code_hash(source)}.py"
+        source_hash = code_hash(source_bytes)
+        candidate_path = Path(self.directory.name) / f"{source_hash}.py"
         if not candidate_path.exists():
             candidate_path.write_text(source, encoding="utf-8")
         with self.lock, torch.cuda.device(self.device), torch.no_grad():
-            candidate = _load_call(candidate_path, self.constants)
+            candidate = _load_call(candidate_path, self.constants, source_hash)
             assert_candidate_matches(
                 torch,
                 self.baseline,
@@ -635,7 +638,7 @@ class _Evaluator:
                 candidate,
                 inputs,
                 self.directory.name,
-                code_hash(source),
+                source_hash,
             )
             report["reference"] = "torch_inductor_generated"
             return report
@@ -933,8 +936,13 @@ class _AttemptWorkspace:
             names = ", ".join(allowed)
             raise ValueError(f"path must be one of: {names}")
         candidate = allowed[normalized]
-        source = self._annotate(candidate.read_text(encoding="utf-8"))
-        candidate.write_text(source, encoding="utf-8")
+        original = candidate.read_text(encoding="utf-8")
+        source = self._annotate(original)
+        if source is original:
+            # Preserve the restart cursor without rewriting a potentially large source file.
+            candidate.touch()
+        else:
+            candidate.write_text(source, encoding="utf-8")
         self.latest = candidate
         return normalized, source
 
@@ -968,8 +976,10 @@ class _AttemptWorkspace:
         )
         return f"/profiles/{path.name}"
 
-    # _annotate replaces any model-edited reference block with the trusted original.
+    # _annotate keeps a trusted prefix allocation-free or repairs a model-edited reference block.
     def _annotate(self, source):
+        if source.startswith(self.header):
+            return source
         _, body = _split_reference(source)
         return f"{self.header}{body}"
 
@@ -1023,10 +1033,11 @@ class _BenchmarkTrack:
         candidate = _unwrap_source(proposed_source)
         if not candidate:
             return {"correct": False, "error": "source is empty"}
-        if len(candidate.encode()) > MAX_SOURCE_BYTES:
+        candidate_bytes = candidate.encode()
+        if len(candidate_bytes) > MAX_SOURCE_BYTES:
             return {"correct": False, "error": "source exceeds 64 MiB"}
 
-        source_hash = hashlib.sha256(candidate.encode()).hexdigest()
+        source_hash = hashlib.sha256(candidate_bytes).hexdigest()
         with self.lock:
             if self.loop_complete:
                 return {

@@ -61,6 +61,7 @@ def benchmark_pair(
 ):
     functions = ((reference_name, reference), ("candidate_triton", candidate))
     with torch.no_grad():
+        # Generated wrappers clear boxed inputs, so every invocation needs a fresh list.
         for _ in range(warmup):
             for _, measured in functions:
                 measured(list(inputs))

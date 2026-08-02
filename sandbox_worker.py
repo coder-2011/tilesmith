@@ -186,14 +186,10 @@ def _benchmark_fixture(torch, workload, kernel, request):
     def reference(values):
         return workload.model(*values)
 
-    # candidate adapts Inductor's boxed convention to the paired timer.
-    def candidate(values):
-        return kernel.call(list(values))
-
     return benchmark_pair(
         torch,
         reference,
-        candidate,
+        kernel.call,
         inputs,
         "pytorch",
         int(request["warmup"]),
@@ -268,14 +264,10 @@ def _evaluate_fixture(torch, triton):
     metadata["cases"] = _check(torch, workload, candidate)
     inputs = workload.make_inputs("cuda")
 
-    # measured adapts the generated fixture's boxed convention for profiling.
-    def measured(values):
-        return candidate.call(list(values))
-
     metadata.update(_benchmark_fixture(torch, workload, candidate, request))
     metadata["profiling"] = profile_cuda(
         torch,
-        measured,
+        candidate.call,
         inputs,
         ROOT,
         "fixture-candidate",
