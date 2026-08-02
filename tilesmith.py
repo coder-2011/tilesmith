@@ -229,7 +229,7 @@ class _Backend:
     def __init__(self, settings):
         self.settings = settings
 
-    # __call__ delegates Dynamo's graph to the same compile_fx entrypoint as the built-in Inductor backend.
+    # __call__ gives Dynamo's graph to the full Inductor pipeline without overriding PyTorch's configuration.
     def __call__(self, graph_module, example_inputs):
         from torch._inductor.compile_fx import compile_fx
 
@@ -237,10 +237,9 @@ class _Backend:
             graph_module,
             example_inputs,
             inner_compile=self._inner_compile,
-            config_patches={"triton.cudagraphs": False},
         )
 
-    # _inner_compile adds a lazy optimizer after Inductor has produced and loaded one generated Python wrapper.
+    # _inner_compile first completes an Inductor artifact, then considers its loaded Python wrapper.
     def _inner_compile(self, graph_module, example_inputs, **kwargs):
         import torch
         from torch._inductor.compile_fx import compile_fx_inner

@@ -1,7 +1,9 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from typing import Any, ClassVar, Sequence
 from unittest.mock import patch
 
@@ -47,6 +49,34 @@ class _Evaluator:
 
 class TilesmithAgentTests(unittest.TestCase):
     """Cover the graph boundary and the host-owned benchmark invariants."""
+
+    # test_backend_preserves_pytorch_configuration keeps Tilesmith from disabling Inductor features.
+    def test_backend_preserves_pytorch_configuration(self):
+        calls = []
+
+        # fake_compile_fx records the exact boundary without requiring PyTorch on the test host.
+        def fake_compile_fx(graph_module, example_inputs, **kwargs):
+            calls.append((graph_module, example_inputs, kwargs))
+            return "compiled"
+
+        torch_module = ModuleType("torch")
+        inductor_module = ModuleType("torch._inductor")
+        compile_module = ModuleType("torch._inductor.compile_fx")
+        compile_module.compile_fx = fake_compile_fx
+        modules = {
+            "torch": torch_module,
+            "torch._inductor": inductor_module,
+            "torch._inductor.compile_fx": compile_module,
+        }
+        backend = tilesmith._Backend(settings=None)
+
+        with patch.dict(sys.modules, modules):
+            result = backend("graph", ("input",))
+
+        self.assertEqual(result, "compiled")
+        self.assertEqual(calls[0][:2], ("graph", ("input",)))
+        self.assertEqual(set(calls[0][2]), {"inner_compile"})
+        self.assertIs(calls[0][2]["inner_compile"].__self__, backend)
 
     # test_track_enforces_one_new_benchmark_per_loop checks the costly stateful edge cases together.
     def test_track_enforces_one_new_benchmark_per_loop(self):

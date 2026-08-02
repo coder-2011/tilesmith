@@ -1,8 +1,10 @@
 # Tilesmith
 
-Tilesmith extracts TorchInductor's generated Triton wrapper, gives it to a
-LangGraph Deep Agent, and installs a candidate only after reference correctness
-and NVIDIA GPU timing both pass.
+Tilesmith is a small addition to `torch.compile`, not an alternative compiler.
+PyTorch runs Dynamo, AOTAutograd, and TorchInductor normally; only after Inductor
+finishes an eligible raw Triton wrapper does Tilesmith ask a LangGraph Deep Agent
+to improve it. A candidate is installed only after reference correctness and
+NVIDIA GPU timing both pass.
 
 ## PyTorch API
 
@@ -33,10 +35,11 @@ output = optimized_model(x)
 ```
 
 `tilesmith.compile` returns a normal `torch.compile` callable, so PyTorch keeps
-the model's output structure and autograd integration. Compilation remains
-lazy: the first real call optimizes each eligible forward or backward Inductor
-graph. Dynamic-shape, mixed-device, multi-GPU, input-mutating, non-Triton, and
-wrapped graphs safely stay on ordinary Inductor.
+the model's output structure, autograd integration, compiler configuration, and
+runtime wrappers. Compilation remains lazy: after PyTorch finishes each eligible
+forward or backward Inductor graph, the first real call asks Tilesmith to improve
+that artifact. Dynamic-shape, mixed-device, multi-GPU, input-mutating,
+non-Triton, and wrapped graphs safely stay on ordinary Inductor.
 
 ## Remote benchmarks
 
