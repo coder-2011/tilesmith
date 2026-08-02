@@ -1,18 +1,15 @@
 import argparse
 import json
 import os
-import re
-import shlex
-import subprocess
-import sys
-import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from tilesmith import (
     _ComputeSandbox,
     _default_skills,
-    _evaluator_server,
     _read_compute_config,
+    _read_settings,
+    _run_agent,
 )
 
 
@@ -50,11 +47,11 @@ class _FixtureEvaluator:
         return self.worker.run("evaluate-fixture")
 
 
-# _run creates one ComputeSDK evaluator, builds the controlled baseline, and drives every attempt.
+# _run creates one ComputeSDK evaluator, builds the controlled baseline, and drives the graph.
 def _run(args):
-    if args.attempts < 2:
+    if args.benchmarks < 2:
         raise ValueError(
-            "--attempts must be at least 2 so this exercises an agent loop"
+            "--benchmarks must be at least 2 so this exercises an agent loop"
         )
     if args.launches < 2:
         raise ValueError("--launches must be at least 2")
@@ -62,8 +59,6 @@ def _run(args):
         raise ValueError("--expected-improvement must be in [0, 1)")
     if not args.chip.strip():
         raise ValueError("--chip must not be empty")
-    if not args.config:
-        raise ValueError("--config or CLIPROXY_CONFIG is required")
 
     workload_source = (ROOT / "workload.py").read_text(encoding="utf-8")
     skills = args.skill if args.skill is not None else _default_skills()
@@ -82,79 +77,27 @@ def _run(args):
         )
 
         evaluator = _FixtureEvaluator(worker)
-        with tempfile.TemporaryDirectory(prefix="tilesmith-benchmark-") as directory:
-            kernel_path = Path(directory) / "generated.py"
-            kernel_path.write_text(baseline_source, encoding="utf-8")
-            with _evaluator_server(evaluator) as (url, token):
-                evaluate_command = shlex.join(
-                    [
-                        sys.executable,
-                        str(ROOT / "tilesmith.py"),
-                        "_evaluate",
-                        url,
-                        token,
-                    ]
-                )
-                command = [
-                    "go",
-                    "run",
-                    ".",
-                    "-kernel",
-                    str(kernel_path),
-                    "-evaluate",
-                    evaluate_command,
-                    "-config",
-                    args.config,
-                    "-model",
-                    args.model,
-                    "-chip",
-                    evaluator.chip,
-                    "-iterations",
-                    str(args.attempts),
-                    "-min-improvement",
-                    "0.05",
-                    "-timeout",
-                    "20m",
-                ]
-                for skill in skills:
-                    command.extend(["-skill", skill])
-                process = subprocess.Popen(
-                    command,
-                    cwd=ROOT,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
-                output = []
-                for line in process.stdout:
-                    print(line, end="", flush=True)
-                    output.append(line)
-                return_code = process.wait()
-                if return_code != 0:
-                    raise RuntimeError(f"agent exited with status {return_code}")
-
-    agent_output = "".join(output)
-    attempts = re.findall(r"^attempt \d+:", agent_output, flags=re.MULTILINE)
-    searches = re.findall(
-        r"^research \d+: (\d+) web search calls$",
-        agent_output,
-        flags=re.MULTILINE,
-    )
-    installed = re.search(
-        r"installed ([0-9.]+)% improvement: ([0-9.eE+-]+) -> ([0-9.eE+-]+)",
-        agent_output,
-    )
-    if len(attempts) != args.attempts:
-        raise RuntimeError(
-            f"agent completed {len(attempts)} of {args.attempts} attempts"
+        settings = replace(
+            _read_settings(None, ""),
+            chip=evaluator.chip,
+            iterations=args.benchmarks,
+            min_improvement=0.05,
+            model=args.model,
+            sandbox="computesdk",
+            skills=tuple(skills),
         )
-    search_count = sum(int(count) for count in searches)
-    if search_count < 1:
+        result = _run_agent(baseline_source, settings, evaluator)
+
+    if result.model_calls < 2:
+        raise RuntimeError("agent did not execute a multi-turn graph")
+    if result.benchmarks < 1:
+        raise RuntimeError("agent did not use benchmark_candidate")
+    if result.web_searches < 1:
         raise RuntimeError("agent did not use hosted web search")
-    if installed is None:
+    if result.source == baseline_source:
         raise RuntimeError("agent did not catch the controlled optimization")
 
-    gain = float(installed.group(1)) / 100
+    gain = (result.baseline_score - result.confirmed_score) / result.baseline_score
     if gain < args.expected_improvement:
         raise RuntimeError(
             f"measured gain {gain:.1%} is below required "
@@ -163,12 +106,13 @@ def _run(args):
     print(
         json.dumps(
             {
-                "baseline_score": float(installed.group(2)),
-                "confirmed_score": float(installed.group(3)),
+                "baseline_score": result.baseline_score,
+                "benchmarks": result.benchmarks,
+                "confirmed_score": result.confirmed_score,
                 "improvement": gain,
-                "model_attempts": len(attempts),
+                "model_calls": result.model_calls,
                 "skill_files": len(skills),
-                "web_searches": search_count,
+                "web_searches": result.web_searches,
             },
             sort_keys=True,
         )
@@ -183,11 +127,16 @@ def _parse_args():
     commands = parser.add_subparsers(dest="command", required=True)
 
     run_parser = commands.add_parser(
-        "run", help="run the complete multi-attempt benchmark"
+        "run", help="run the complete Deep Agents benchmark"
     )
-    run_parser.add_argument("--attempts", type=int, default=4)
+    run_parser.add_argument(
+        "--benchmarks",
+        "--attempts",
+        dest="benchmarks",
+        type=int,
+        default=4,
+    )
     run_parser.add_argument("--chip", default="H100")
-    run_parser.add_argument("--config", default=os.environ.get("CLIPROXY_CONFIG", ""))
     run_parser.add_argument("--expected-improvement", type=float, default=0.25)
     run_parser.add_argument("--launches", type=int, default=4)
     run_parser.add_argument(
