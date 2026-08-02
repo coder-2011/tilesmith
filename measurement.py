@@ -28,6 +28,26 @@ def variant_inputs(torch, inputs, variant):
     return tuple(values)
 
 
+# assert_candidate_matches applies Tilesmith's shared numerical gate to one generated candidate.
+def assert_candidate_matches(torch, reference, candidate, inputs):
+    with torch.no_grad():
+        for variant in ("normal", "zero", "high"):
+            cpu_state = torch.random.get_rng_state()
+            cuda_states = torch.cuda.get_rng_state_all()
+            expected_inputs = variant_inputs(torch, inputs, variant)
+            expected = reference(list(expected_inputs))
+            torch.random.set_rng_state(cpu_state)
+            torch.cuda.set_rng_state_all(cuda_states)
+            actual_inputs = variant_inputs(torch, inputs, variant)
+            actual = candidate(list(actual_inputs))
+            torch.testing.assert_close(
+                actual,
+                expected,
+                equal_nan=True,
+                check_stride=True,
+            )
+
+
 # benchmark_pair returns fixed-policy paired CUDA-event samples and their median ratio.
 def benchmark_pair(
     torch,

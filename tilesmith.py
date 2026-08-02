@@ -18,7 +18,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
-from measurement import benchmark_pair, profile_cuda, variant_inputs
+from measurement import (
+    assert_candidate_matches,
+    benchmark_pair,
+    profile_cuda,
+    variant_inputs,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -79,7 +84,7 @@ class _Settings:
 
 @dataclass(frozen=True)
 class _AgentResult:
-    """Report the host-selected graph result and evidence used by the paid fixture."""
+    """Report the host-selected graph result and its validation evidence."""
 
     source: str
     baseline_score: float
@@ -363,20 +368,21 @@ class _LazyKernel:
             cached = _read_cache(self.settings.cache_dir, cache_key)
             if cached is None:
                 with OPTIMIZE_LOCK, _preserve_rng():
+                    # Remote evaluation acquires a sandbox; local evaluation needs no resource scope.
                     if self.settings.compute is not None:
-                        with _ComputeEvaluator(
+                        evaluator_scope = _ComputeEvaluator(
                             self.source, self.constants, inputs, self.settings
-                        ) as evaluator:
-                            result = _run_agent(
-                                self.source,
-                                self.settings,
-                                evaluator,
-                                self.settings.cache_dir / "tracks" / cache_key,
-                            )
-                    else:
-                        evaluator = _Evaluator(
-                            self.baseline, self.constants, inputs, device
                         )
+                    else:
+                        evaluator_scope = contextlib.nullcontext(
+                            _Evaluator(
+                                self.baseline,
+                                self.constants,
+                                inputs,
+                                device,
+                            )
+                        )
+                    with evaluator_scope as evaluator:
                         result = _run_agent(
                             self.source,
                             self.settings,
@@ -429,7 +435,7 @@ def _split_reference(source):
     return source[:boundary], source[boundary:]
 
 
-# _package_version records agent-runtime drift without making zero-iteration compilation import it.
+# _package_version records agent-runtime drift without importing optional packages.
 def _package_version(name):
     try:
         return importlib.metadata.version(name)
@@ -605,21 +611,12 @@ class _Evaluator:
             candidate_path.write_text(source, encoding="utf-8")
         with self.lock, torch.cuda.device(self.device), torch.no_grad():
             candidate = _load_call(candidate_path, self.constants)
-            for variant in ("normal", "zero", "high"):
-                cpu_state = torch.random.get_rng_state()
-                cuda_states = torch.cuda.get_rng_state_all()
-                expected_inputs = variant_inputs(torch, self.inputs, variant)
-                expected = self.baseline(list(expected_inputs))
-                torch.random.set_rng_state(cpu_state)
-                torch.cuda.set_rng_state_all(cuda_states)
-                actual_inputs = variant_inputs(torch, self.inputs, variant)
-                actual = candidate(list(actual_inputs))
-                torch.testing.assert_close(
-                    actual,
-                    expected,
-                    equal_nan=True,
-                    check_stride=True,
-                )
+            assert_candidate_matches(
+                torch,
+                self.baseline,
+                candidate,
+                self.inputs,
+            )
             torch.cuda.synchronize(self.device)
             inputs = variant_inputs(torch, self.inputs, "normal")
             report = benchmark_pair(
@@ -1021,32 +1018,29 @@ class _BenchmarkTrack:
             "status": status,
         }
 
-    # benchmark validates one complete candidate and returns host-owned JSON evidence to the graph.
+    # benchmark validates one candidate and returns host-owned evidence to the tool boundary.
     def benchmark(self, proposed_source):
         candidate = _unwrap_source(proposed_source)
         if not candidate:
-            return self._respond({"correct": False, "error": "source is empty"})
+            return {"correct": False, "error": "source is empty"}
         if len(candidate.encode()) > MAX_SOURCE_BYTES:
-            return self._respond({"correct": False, "error": "source exceeds 64 MiB"})
+            return {"correct": False, "error": "source exceeds 64 MiB"}
 
         source_hash = hashlib.sha256(candidate.encode()).hexdigest()
         with self.lock:
             if self.loop_complete:
-                return self._respond(
-                    {
-                        "correct": False,
-                        "error": "this graph loop already benchmarked a candidate; conclude the loop",
-                        "progress": self._progress("loop_complete"),
-                        "source_sha256": source_hash,
-                    }
-                )
+                return {
+                    "correct": False,
+                    "error": "this graph loop already benchmarked a candidate; conclude the loop",
+                    "progress": self._progress("loop_complete"),
+                    "source_sha256": source_hash,
+                }
             if source_hash in self.evaluated:
-                cached = {
+                return {
                     **self.evaluated[source_hash],
                     "cached": True,
                     "progress": self._progress("needs_new_candidate"),
                 }
-                return self._respond(cached)
 
             # Evaluators share one GPU or remote sandbox, so the lock also prevents overlapping timings.
             self.benchmarks += 1
@@ -1085,11 +1079,8 @@ class _BenchmarkTrack:
                 f"loop {self.loop + 1}/{self.loops} complete: "
                 f"{report.get('score', report.get('error'))}"
             )
-            return self._respond(report)
-
-    # _respond serializes evaluator evidence at the graph's tool boundary.
-    def _respond(self, report):
-        return json.dumps(report, default=str, sort_keys=True)
+            # The tool may add path metadata, so do not expose the retained report itself.
+            return dict(report)
 
 
 class _BenchmarkHistoryEdit:
@@ -1189,8 +1180,13 @@ def _chat_model(settings):
 # _run_agent executes one permissive Deep Agents graph and installs only a freshly confirmed win.
 def _run_agent(source, settings, evaluator, workspace_dir):
     baseline_report = evaluator.evaluate(source)
-    baseline_score = _report_score(baseline_report, "baseline")
-    print(f"baseline: {baseline_score:.6g}")
+    track = _BenchmarkTrack(
+        source,
+        baseline_report,
+        evaluator,
+        settings.loops,
+    )
+    print(f"baseline: {track.baseline_score:.6g}")
 
     try:
         from deepagents import create_deep_agent
@@ -1207,12 +1203,6 @@ def _run_agent(source, settings, evaluator, workspace_dir):
             "Tilesmith requires deepagents and langchain-openai"
         ) from error
 
-    track = _BenchmarkTrack(
-        source,
-        baseline_report,
-        evaluator,
-        settings.loops,
-    )
     workspace = _AttemptWorkspace(workspace_dir, source)
     workspace.write_report("baseline", baseline_report)
 
@@ -1229,7 +1219,7 @@ def _run_agent(source, settings, evaluator, workspace_dir):
             )
 
         previous_benchmarks = track.benchmarks
-        report = json.loads(track.benchmark(candidate))
+        report = track.benchmark(candidate)
         report["attempt_path"] = attempt_path
         if track.benchmarks > previous_benchmarks:
             report["report_path"] = workspace.write_report(
@@ -1317,8 +1307,8 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         print("no improvement; original left unchanged")
         return _AgentResult(
             source,
-            baseline_score,
-            baseline_score,
+            track.baseline_score,
+            track.baseline_score,
             track.benchmarks,
             model_calls,
         )
@@ -1330,31 +1320,31 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         print(f"final candidate failed confirmation: {_summarize(error)}")
         return _AgentResult(
             source,
-            baseline_score,
-            baseline_score,
+            track.baseline_score,
+            track.baseline_score,
             track.benchmarks,
             model_calls,
         )
 
-    confirmed_gain = (baseline_score - confirmed_score) / baseline_score
+    confirmed_gain = (track.baseline_score - confirmed_score) / track.baseline_score
     if confirmed_gain < settings.min_improvement:
         print(
             f"unconfirmed improvement ({confirmed_score:.6g}); original left unchanged"
         )
         return _AgentResult(
             source,
-            baseline_score,
+            track.baseline_score,
             confirmed_score,
             track.benchmarks,
             model_calls,
         )
     print(
         f"installed {confirmed_gain:.2%} improvement: "
-        f"{baseline_score:.6g} -> {confirmed_score:.6g}"
+        f"{track.baseline_score:.6g} -> {confirmed_score:.6g}"
     )
     return _AgentResult(
         track.best_source,
-        baseline_score,
+        track.baseline_score,
         confirmed_score,
         track.benchmarks,
         model_calls,

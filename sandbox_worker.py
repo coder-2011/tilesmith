@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from measurement import benchmark_pair, profile_cuda, variant_inputs
+from measurement import assert_candidate_matches, benchmark_pair, profile_cuda
 
 
 ROOT = Path(__file__).resolve().parent
@@ -132,27 +132,6 @@ def _check(torch, workload, kernel):
     return case_count
 
 
-# _check_generated compares candidate source with PyTorch's unmodified Inductor wrapper.
-def _check_generated(torch, baseline, candidate, inputs):
-    with torch.no_grad():
-        for variant in ("normal", "zero", "high"):
-            cpu_state = torch.random.get_rng_state()
-            cuda_states = torch.cuda.get_rng_state_all()
-            expected_inputs = variant_inputs(torch, inputs, variant)
-            expected = baseline(list(expected_inputs))
-            torch.random.set_rng_state(cpu_state)
-            torch.cuda.set_rng_state_all(cuda_states)
-            actual_inputs = variant_inputs(torch, inputs, variant)
-            actual = candidate(list(actual_inputs))
-            torch.testing.assert_close(
-                actual,
-                expected,
-                equal_nan=True,
-                check_stride=True,
-            )
-    torch.cuda.synchronize()
-
-
 # _extract captures and validates TorchInductor's generated wrapper for the paid fixture.
 def _extract(torch, workload):
     from torch._inductor import config
@@ -241,7 +220,8 @@ def _compare(torch, triton):
     inputs = _to_cuda(torch, serialized["inputs"])
     baseline = _load_generated(torch, ROOT / "baseline.py", constants)
     candidate = _load_generated(torch, ROOT / "candidate.py", constants)
-    _check_generated(torch, baseline, candidate, inputs)
+    assert_candidate_matches(torch, baseline, candidate, inputs)
+    torch.cuda.synchronize()
 
     metadata.update(
         benchmark_pair(

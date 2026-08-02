@@ -1,4 +1,3 @@
-import json
 import sys
 import tempfile
 import unittest
@@ -84,18 +83,20 @@ class TilesmithAgentTests(unittest.TestCase):
         track = tilesmith._BenchmarkTrack("baseline\n", {"score": 1.0}, evaluator, 2)
 
         track.start_loop(0)
-        baseline = json.loads(track.benchmark("baseline"))
-        measured = json.loads(track.benchmark("candidate-7"))
-        blocked = json.loads(track.benchmark("candidate-8"))
+        baseline = track.benchmark("baseline")
+        measured = track.benchmark("candidate-7")
+        measured["caller_only"] = True
+        blocked = track.benchmark("candidate-8")
         track.start_loop(1)
-        cached = json.loads(track.benchmark("candidate-7"))
-        second = json.loads(track.benchmark("candidate-8"))
+        cached = track.benchmark("candidate-7")
+        second = track.benchmark("candidate-8")
 
         self.assertTrue(baseline["cached"])
         self.assertEqual(baseline["progress"]["status"], "needs_new_candidate")
         self.assertAlmostEqual(measured["score"], 0.93)
         self.assertIn("already benchmarked", blocked["error"])
         self.assertTrue(cached["cached"])
+        self.assertNotIn("caller_only", cached)
         self.assertAlmostEqual(second["score"], 0.92)
         self.assertEqual(second["progress"]["percent"], 100)
         self.assertEqual(track.benchmarks, 2)
