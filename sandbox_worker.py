@@ -1,17 +1,16 @@
+"""Run Tilesmith correctness checks and CUDA benchmarks inside a sandbox."""
+
 import importlib.util
-import io
+import json
 import os
 import statistics
 import subprocess
-import tempfile
+import sys
 from pathlib import Path
 
-import modal
 
-
-app = modal.App("tilesmith")
-image = modal.Image.debian_slim(python_version="3.12").uv_pip_install("torch==2.13.0")
-cache = modal.Volume.from_name("tilesmith-h100-cache", create_if_missing=True)
+ROOT = Path(__file__).resolve().parent
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(ROOT / "cache")
 
 
 # _load_module imports one self-contained Python file under a unique module name.
@@ -36,7 +35,9 @@ def _load_generated(torch, path, constants):
 # _clone_inputs keeps reference and candidate executions from sharing mutable tensors.
 def _clone_inputs(torch, inputs):
     return tuple(
-        value.clone(memory_format=torch.preserve_format) if torch.is_tensor(value) else value
+        value.clone(memory_format=torch.preserve_format)
+        if torch.is_tensor(value)
+        else value
         for value in inputs
     )
 
@@ -54,7 +55,7 @@ def _to_cuda(torch, value):
     return value
 
 
-# _outputs normalizes a single tensor and a tuple of tensors to the same comparison shape.
+# _outputs normalizes a single tensor and a tuple of tensors for comparison.
 def _outputs(value):
     if isinstance(value, (tuple, list)):
         return tuple(value)
@@ -70,7 +71,6 @@ def _metadata(torch, triton):
     ).strip()
     return {
         "cache_policy": "warm",
-        "clock_policy": "Modal default",
         "compute_capability": f"{capability[0]}.{capability[1]}",
         "cuda": str(torch.version.cuda),
         "driver": driver,
@@ -80,7 +80,31 @@ def _metadata(torch, triton):
     }
 
 
-# _check compares the generated wrapper against eager PyTorch on every workload case.
+# _request reads the host-owned benchmark policy and expected runtime versions.
+def _request():
+    value = json.loads((ROOT / "request.json").read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise RuntimeError("request.json must contain an object")
+    return value
+
+
+# _validate_environment rejects a sandbox that cannot execute the generated source faithfully.
+def _validate_environment(metadata, request):
+    requested_chip = str(request["chip"]).rstrip("!")
+    if requested_chip.lower() not in metadata["gpu"].lower():
+        raise RuntimeError(
+            f"requested {requested_chip}, sandbox provisioned {metadata['gpu']}"
+        )
+    for package in ("torch", "triton"):
+        expected = request.get(package)
+        if expected is not None and str(expected) != metadata[package]:
+            raise RuntimeError(
+                f"{package} version mismatch: host {expected}, "
+                f"sandbox {metadata[package]}"
+            )
+
+
+# _check compares the controlled generated wrapper against eager PyTorch.
 def _check(torch, workload, kernel):
     if hasattr(workload, "make_cases"):
         cases = workload.make_cases("cuda")
@@ -92,10 +116,8 @@ def _check(torch, workload, kernel):
     case_count = 0
     with torch.no_grad():
         for inputs in cases:
-            expected_inputs = _clone_inputs(torch, inputs)
-            candidate_inputs = _clone_inputs(torch, inputs)
-            expected = workload.model(*expected_inputs)
-            actual = kernel.call(list(candidate_inputs))
+            expected = workload.model(*_clone_inputs(torch, inputs))
+            actual = kernel.call(list(_clone_inputs(torch, inputs)))
             torch.testing.assert_close(
                 _outputs(actual),
                 _outputs(expected),
@@ -108,7 +130,7 @@ def _check(torch, workload, kernel):
     return case_count
 
 
-# _generated_inputs creates value variants without changing compiled shapes, dtypes, or strides.
+# _generated_inputs changes values without changing compiled shapes, dtypes, or strides.
 def _generated_inputs(torch, inputs, variant):
     values = []
     for value in inputs:
@@ -138,7 +160,7 @@ def _check_generated(torch, baseline, candidate, inputs):
     torch.cuda.synchronize()
 
 
-# _benchmark_pair alternates execution order and reports a median of paired CUDA-event ratios.
+# _benchmark_pair alternates execution order and reports paired CUDA-event ratios.
 def _benchmark_pair(
     torch,
     reference,
@@ -187,12 +209,11 @@ def _benchmark_pair(
     }
 
 
-# _extract captures TorchInductor's generated wrapper through its inner compile hook.
+# _extract captures and validates TorchInductor's generated wrapper for the paid fixture.
 def _extract(torch, workload):
     from torch._inductor import config
     from torch._inductor.compile_fx import compile_fx, compile_fx_inner
 
-    # Both graph caches can bypass the backend or its inner source-capture hook.
     torch._dynamo.reset()
     config.fx_graph_cache = False
     sources = []
@@ -203,7 +224,7 @@ def _extract(torch, workload):
         sources.append(compiled.source_code)
         return compiled
 
-    # backend preserves Inductor's normal outer compilation while inserting the capture hook.
+    # backend preserves Inductor's outer compilation while inserting the capture hook.
     def backend(graph_module, example_inputs):
         return compile_fx(
             graph_module,
@@ -213,12 +234,10 @@ def _extract(torch, workload):
         )
 
     inputs = workload.make_inputs("cuda")
-    expected_inputs = _clone_inputs(torch, inputs)
-    compiled_inputs = _clone_inputs(torch, inputs)
     with torch.no_grad():
-        expected = workload.model(*expected_inputs)
+        expected = workload.model(*_clone_inputs(torch, inputs))
         compiled = torch.compile(workload.model, backend=backend, fullgraph=True)
-        actual = compiled(*compiled_inputs)
+        actual = compiled(*_clone_inputs(torch, inputs))
         torch.testing.assert_close(
             _outputs(actual),
             _outputs(expected),
@@ -231,18 +250,14 @@ def _extract(torch, workload):
     if len(sources) != 1:
         raise RuntimeError(f"expected one generated wrapper, found {len(sources)}")
     first_line, separator, remainder = sources[0].partition("\n")
-    # PyTorch increments this comment even when the executable wrapper is identical.
     if first_line.startswith("# AOT ID:"):
         return remainder if separator else ""
     return sources[0]
 
 
-# _benchmark compares eager PyTorch with the custom generated wrapper under identical timing.
-def _benchmark(torch, workload, kernel):
+# _benchmark_fixture compares eager PyTorch with the controlled generated wrapper.
+def _benchmark_fixture(torch, workload, kernel, request):
     inputs = workload.make_inputs("cuda")
-    warmup = getattr(workload, "WARMUP", 25)
-    iterations = getattr(workload, "BENCH_ITERATIONS", 100)
-    sample_count = getattr(workload, "BENCH_SAMPLES", 7)
 
     # reference adapts the eager positional convention to the paired timer.
     def reference(values):
@@ -258,103 +273,95 @@ def _benchmark(torch, workload, kernel):
         candidate,
         inputs,
         "pytorch",
-        warmup,
-        iterations,
-        sample_count,
+        int(request["warmup"]),
+        int(request["iterations"]),
+        int(request["samples"]),
     )
 
 
-# benchmark_fixture extracts or evaluates the controlled generated wrapper on an NVIDIA H100.
-@app.function(image=image, gpu="H100!", timeout=1200, volumes={"/cache": cache})
-def benchmark_fixture(action, workload_source, kernel_source):
-    if action not in {"extract", "evaluate"}:
-        raise ValueError("action must be extract or evaluate")
-
-    os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/cache/torchinductor"
-
-    import torch
-    import triton
-
-    with tempfile.TemporaryDirectory(prefix="tilesmith-") as directory:
-        workload_path = Path(directory) / "workload.py"
-        workload_path.write_text(workload_source, encoding="utf-8")
-        workload = _load_module("tilesmith_workload", workload_path)
-        metadata = _metadata(torch, triton)
-        if hasattr(workload, "SHAPE"):
-            metadata["shape"] = list(workload.SHAPE)
-        if hasattr(workload, "DTYPE"):
-            metadata["dtype"] = workload.DTYPE
-
-        if action == "extract":
-            metadata["source"] = _extract(torch, workload)
-            cache.commit()
-            return metadata
-
-        kernel_path = Path(directory) / "candidate.py"
-        kernel_path.write_text(kernel_source, encoding="utf-8")
-        kernel = _load_module("tilesmith_candidate", kernel_path)
-        metadata["cases"] = _check(torch, workload, kernel)
-        metadata.update(_benchmark(torch, workload, kernel))
-        cache.commit()
-        return metadata
-
-
-# compare_generated benchmarks unmodified PyTorch-Inductor and candidate wrappers on an exact H100.
-@app.function(image=image, gpu="H100!", timeout=1200, volumes={"/cache": cache})
-def compare_generated(
-    baseline_source,
-    candidate_source,
-    payload,
-    expected_chip,
-    warmup,
-    iterations,
-    sample_count,
-):
-    os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/cache/torchinductor"
-
-    import torch
-    import triton
-
+# _probe reports capabilities before the agent receives the sandbox as its target.
+def _probe(torch, triton):
+    request = _request()
     metadata = _metadata(torch, triton)
-    if expected_chip != "H100" or "H100" not in metadata["gpu"]:
-        raise RuntimeError(
-            f"requested {expected_chip}, sandbox provisioned {metadata['gpu']}"
+    _validate_environment(metadata, request)
+    return metadata
+
+
+# _compare validates and benchmarks one real Inductor replacement candidate.
+def _compare(torch, triton):
+    request = _request()
+    metadata = _metadata(torch, triton)
+    _validate_environment(metadata, request)
+    serialized = torch.load(ROOT / "payload.pt", map_location="cpu", weights_only=False)
+    constants = _to_cuda(torch, serialized["constants"])
+    inputs = _to_cuda(torch, serialized["inputs"])
+    baseline = _load_generated(torch, ROOT / "baseline.py", constants)
+    candidate = _load_generated(torch, ROOT / "candidate.py", constants)
+    _check_generated(torch, baseline, candidate, inputs)
+
+    # reference and measured preserve the boxed generated-wrapper convention.
+    def reference(values):
+        return baseline(list(values))
+
+    def measured(values):
+        return candidate(list(values))
+
+    metadata.update(
+        _benchmark_pair(
+            torch,
+            reference,
+            measured,
+            inputs,
+            "torch_inductor",
+            int(request["warmup"]),
+            int(request["iterations"]),
+            int(request["samples"]),
         )
+    )
+    metadata["reference"] = "torch_inductor_generated"
+    return metadata
 
-    with tempfile.TemporaryDirectory(prefix="tilesmith-compare-") as directory:
-        baseline_path = Path(directory) / "baseline.py"
-        candidate_path = Path(directory) / "candidate.py"
-        baseline_path.write_text(baseline_source, encoding="utf-8")
-        candidate_path.write_text(candidate_source, encoding="utf-8")
-        serialized = torch.load(
-            io.BytesIO(payload), map_location="cpu", weights_only=False
-        )
-        cuda_constants = _to_cuda(torch, serialized["constants"])
-        cuda_inputs = _to_cuda(torch, serialized["inputs"])
-        baseline = _load_generated(torch, baseline_path, cuda_constants)
-        candidate = _load_generated(torch, candidate_path, cuda_constants)
-        _check_generated(torch, baseline, candidate, cuda_inputs)
 
-        # reference adapts the unmodified boxed wrapper to the paired timer.
-        def reference(values):
-            return baseline(list(values))
+# _extract_fixture prepares the controlled obvious-improvement benchmark source.
+def _extract_fixture(torch, triton):
+    request = _request()
+    metadata = _metadata(torch, triton)
+    _validate_environment(metadata, request)
+    workload = _load_module("tilesmith_workload", ROOT / "workload.py")
+    metadata["source"] = _extract(torch, workload)
+    metadata["shape"] = list(workload.SHAPE)
+    metadata["dtype"] = workload.DTYPE
+    return metadata
 
-        # measured adapts the candidate boxed wrapper to the paired timer.
-        def measured(values):
-            return candidate(list(values))
 
-        metadata.update(
-            _benchmark_pair(
-                torch,
-                reference,
-                measured,
-                cuda_inputs,
-                "torch_inductor",
-                warmup,
-                iterations,
-                sample_count,
-            )
-        )
-        metadata["reference"] = "torch_inductor_generated"
-        cache.commit()
-        return metadata
+# _evaluate_fixture checks and times one controlled benchmark candidate.
+def _evaluate_fixture(torch, triton):
+    request = _request()
+    metadata = _metadata(torch, triton)
+    _validate_environment(metadata, request)
+    workload = _load_module("tilesmith_workload", ROOT / "workload.py")
+    candidate = _load_module("tilesmith_candidate", ROOT / "candidate.py")
+    metadata["cases"] = _check(torch, workload, candidate)
+    metadata.update(_benchmark_fixture(torch, workload, candidate, request))
+    return metadata
+
+
+# main dispatches the single requested worker action and emits one JSON report.
+def main():
+    import torch
+    import triton
+
+    actions = {
+        "probe": _probe,
+        "compare": _compare,
+        "extract-fixture": _extract_fixture,
+        "evaluate-fixture": _evaluate_fixture,
+    }
+    if len(sys.argv) != 2 or sys.argv[1] not in actions:
+        raise SystemExit(f"usage: {Path(sys.argv[0]).name} {'|'.join(actions)}")
+    result = actions[sys.argv[1]](torch, triton)
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

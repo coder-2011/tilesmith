@@ -1,4 +1,5 @@
 import builtins
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -17,7 +18,7 @@ import tempfile
 import threading
 import urllib.request
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -27,6 +28,21 @@ BENCH_ITERATIONS = 100
 BENCH_SAMPLES = 7
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 OPTIMIZE_LOCK = threading.Lock()
+REMOTE_ROOT = "/tmp/tilesmith"
+REMOTE_COMMAND_TIMEOUT_MS = 20 * 60 * 1000
+UPLOAD_CHUNK_BYTES = 384 * 1024  # Divisible by 3 so base64 chunks concatenate.
+
+
+@dataclass(frozen=True)
+class _ComputeConfig:
+    """Hold exported ComputeSDK credentials and one sandbox lifetime."""
+
+    api_key: str = field(repr=False)
+    gateway_url: str
+    sandbox_timeout: int
+    template: str
+    token_id: str = field(repr=False)
+    token_secret: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -34,10 +50,10 @@ class _Settings:
     agent_root: Path
     cache_dir: Path
     chip: str
+    compute: _ComputeConfig | None
     config: str
     iterations: int
     min_improvement: float
-    modal_profile: str
     model: str
     sandbox: str
     skills: tuple[str, ...]
@@ -46,12 +62,13 @@ class _Settings:
 
 # compile returns a normal torch.compile callable while routing Inductor graphs through Tilesmith.
 def compile(model, *, example_inputs, sandbox=None, chip=None):
-    if sandbox not in (None, "modal"):
-        raise ValueError("sandbox must be None or 'modal'")
+    if sandbox not in (None, "computesdk"):
+        raise ValueError("sandbox must be None or 'computesdk'")
     if sandbox is None and chip is not None:
         raise ValueError("chip is only valid when sandbox is set")
-    if sandbox == "modal" and chip not in ("H100", "H100!"):
-        raise ValueError("sandbox='modal' currently requires chip='H100'")
+    if sandbox == "computesdk" and (not isinstance(chip, str) or not chip.strip()):
+        raise ValueError("sandbox='computesdk' requires a non-empty chip")
+    settings = _read_settings(sandbox, chip or "")
 
     import torch
     from torch._inductor.compile_fx import compile_fx
@@ -68,18 +85,21 @@ def compile(model, *, example_inputs, sandbox=None, chip=None):
     ]
     if not cuda_inputs:
         raise ValueError("example_inputs must contain at least one CUDA tensor")
-    if sandbox == "modal":
+    if sandbox == "computesdk":
         device = cuda_inputs[0].device
-        index = device.index if device.index is not None else torch.cuda.current_device()
-        capability = torch.cuda.get_device_capability(index)
-        if "H100" not in torch.cuda.get_device_name(index) or capability != (9, 0):
-            raise ValueError("chip='H100' requires local H100 execution inputs")
+        index = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
+        device_name = torch.cuda.get_device_name(index)
+        if not _chip_matches(chip, device_name):
+            raise ValueError(
+                f"chip={chip!r} does not match local execution device {device_name!r}"
+            )
     if "inner_compile" not in inspect.signature(compile_fx).parameters:
         raise RuntimeError(
             "this PyTorch version does not expose Inductor's inner_compile hook"
         )
 
-    settings = _read_settings(sandbox, "H100" if chip else "")
     return torch.compile(model, backend=_Backend(settings))
 
 
@@ -101,15 +121,52 @@ def _read_settings(sandbox, chip):
         .expanduser()
         .resolve(),
         chip=chip,
+        compute=_read_compute_config() if sandbox == "computesdk" else None,
         config=os.environ.get("CLIPROXY_CONFIG", ""),
         iterations=iterations,
         min_improvement=min_improvement,
-        modal_profile=os.environ.get("MODAL_PROFILE", "tilesmith-h100"),
         model=os.environ.get("TILESMITH_MODEL", "gpt-5.5"),
         sandbox=sandbox or "local",
         skills=tuple(_default_skills()),
         timeout=os.environ.get("TILESMITH_TIMEOUT", "20m"),
     )
+
+
+# _read_compute_config validates every gateway input before provisioning a billable sandbox.
+def _read_compute_config():
+    try:
+        from computesdk import DEFAULT_GATEWAY_URL
+    except ImportError as error:
+        raise RuntimeError(
+            "sandbox='computesdk' requires the httpx Python package"
+        ) from error
+
+    names = (
+        "COMPUTESDK_API_KEY",
+        "COMPUTESDK_TEMPLATE",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+    )
+    values = {name: os.environ.get(name, "") for name in names}
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        raise ValueError("sandbox='computesdk' requires exported " + ", ".join(missing))
+    sandbox_timeout = int(os.environ.get("TILESMITH_SANDBOX_TIMEOUT", "3600"))
+    if sandbox_timeout <= 60:
+        raise ValueError("TILESMITH_SANDBOX_TIMEOUT must be greater than 60")
+    return _ComputeConfig(
+        api_key=values["COMPUTESDK_API_KEY"],
+        gateway_url=os.environ.get("COMPUTESDK_TRIBUTARY_URL", DEFAULT_GATEWAY_URL),
+        sandbox_timeout=sandbox_timeout,
+        template=values["COMPUTESDK_TEMPLATE"],
+        token_id=values["MODAL_TOKEN_ID"],
+        token_secret=values["MODAL_TOKEN_SECRET"],
+    )
+
+
+# _chip_matches accepts a provider selector such as H100 against its full device name.
+def _chip_matches(requested, observed):
+    return requested.rstrip("!").lower() in observed.lower()
 
 
 # _default_skills gives the kernel agent the local API and CUDA guidance when those files exist.
@@ -220,11 +277,18 @@ class _LazyKernel:
         if not cuda_inputs:
             return self.baseline
         device = cuda_inputs[0].device
-        if self.settings.sandbox == "modal":
-            index = device.index if device.index is not None else torch.cuda.current_device()
-            capability = torch.cuda.get_device_capability(index)
-            if "H100" not in torch.cuda.get_device_name(index) or capability != (9, 0):
-                raise RuntimeError("the H100 sandbox track can execute only on a local H100")
+        if self.settings.compute is not None:
+            index = (
+                device.index
+                if device.index is not None
+                else torch.cuda.current_device()
+            )
+            device_name = torch.cuda.get_device_name(index)
+            if not _chip_matches(self.settings.chip, device_name):
+                raise RuntimeError(
+                    f"sandbox chip {self.settings.chip!r} does not match "
+                    f"execution device {device_name!r}"
+                )
         cache_key = _cache_key(self.source, self.settings, device)
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -232,15 +296,18 @@ class _LazyKernel:
             cached = _read_cache(self.settings.cache_dir, cache_key)
             if cached is None:
                 with OPTIMIZE_LOCK, _preserve_rng():
-                    if self.settings.sandbox == "modal":
-                        evaluator = _ModalEvaluator(
+                    if self.settings.compute is not None:
+                        with _ComputeEvaluator(
                             self.source, self.constants, inputs, self.settings
-                        )
+                        ) as evaluator:
+                            optimized = _run_agent(
+                                self.source, self.settings, evaluator
+                            )
                     else:
                         evaluator = _Evaluator(
                             self.baseline, self.constants, inputs, device
                         )
-                    optimized = _run_agent(self.source, self.settings, evaluator)
+                        optimized = _run_agent(self.source, self.settings, evaluator)
                 cached = _write_cache(self.settings.cache_dir, cache_key, optimized)
         if cached.read_text(encoding="utf-8") == self.source:
             return self.baseline
@@ -272,6 +339,12 @@ def _cache_key(source, settings, device):
         "model": settings.model,
         "sandbox": settings.sandbox,
         "sandbox_chip": settings.chip,
+        "sandbox_gateway": (
+            settings.compute.gateway_url if settings.compute is not None else ""
+        ),
+        "sandbox_template": (
+            settings.compute.template if settings.compute is not None else ""
+        ),
         "torch": str(torch.__version__),
         "triton": str(triton.__version__),
         "warmup": WARMUP,
@@ -280,6 +353,8 @@ def _cache_key(source, settings, device):
     digest.update(source.encode())
     for path in [
         Path(__file__),
+        ROOT / "computesdk.py",
+        ROOT / "sandbox_worker.py",
         settings.agent_root / "main.go",
         *map(Path, settings.skills),
     ]:
@@ -365,7 +440,7 @@ def _load_call(path, constants):
     return module.call
 
 
-# _cpu_copy makes Modal payloads device-independent while preserving tensor layouts.
+# _cpu_copy makes remote payloads device-independent while preserving tensor layouts.
 def _cpu_copy(value):
     import torch
 
@@ -488,14 +563,136 @@ class _Evaluator:
         }
 
 
-class _ModalEvaluator:
-    # __init__ snapshots source, constants, and runtime inputs for remote H100 evaluation.
+class _ComputeSandbox:
+    """Own one reusable ComputeSDK sandbox for an entire graph optimization track."""
+
+    # __init__ retains only the placement request and optional host runtime versions.
+    def __init__(self, config, chip, versions=None):
+        self.config = config
+        self.requested_chip = chip
+        self.versions = versions or {}
+        self.context = None
+        self.sandbox = None
+        self.chip = chip
+        # Reserve the final minute of the sandbox lifetime for teardown.
+        self.command_timeout_ms = min(
+            REMOTE_COMMAND_TIMEOUT_MS,
+            (config.sandbox_timeout - 60) * 1000,
+        )
+
+    # __enter__ provisions once, uploads the worker, and verifies the selected GPU.
+    def __enter__(self):
+        from computesdk import ephemeral_sandbox
+
+        self.context = ephemeral_sandbox(
+            api_key=self.config.api_key,
+            token_id=self.config.token_id,
+            token_secret=self.config.token_secret,
+            gateway_url=self.config.gateway_url,
+            timeout_ms=self.config.sandbox_timeout * 1000,
+            template_id=self.config.template,
+            gpu=self.requested_chip,
+        )
+        self.sandbox = self.context.__enter__()
+        try:
+            created = self.sandbox.run(
+                f"mkdir -p {REMOTE_ROOT}/cache",
+                timeout_ms=60_000,
+            )
+            _require_remote_success(created, "sandbox setup")
+            self.write_text(
+                "worker.py",
+                (ROOT / "sandbox_worker.py").read_text(encoding="utf-8"),
+            )
+            request = {
+                "chip": self.requested_chip,
+                "iterations": BENCH_ITERATIONS,
+                "samples": BENCH_SAMPLES,
+                "warmup": WARMUP,
+                **self.versions,
+            }
+            self.write_text("request.json", json.dumps(request, sort_keys=True))
+            metadata = self.run("probe", timeout_ms=60_000)
+            capability = str(metadata["compute_capability"]).replace(".", "")
+            self.chip = f"{metadata['gpu']} (sm_{capability})"
+            return self
+        except BaseException:
+            self.context.__exit__(*sys.exc_info())
+            raise
+
+    # __exit__ destroys the sandbox even when an agent or benchmark call fails.
+    def __exit__(self, error_type, error, traceback):
+        return self.context.__exit__(error_type, error, traceback)
+
+    # write_text transfers one source or configuration file into the worker root.
+    def write_text(self, name, content):
+        self.sandbox.write_text(f"{REMOTE_ROOT}/{name}", content)
+
+    # write_bytes transfers one binary payload as bounded base64 chunks.
+    def write_bytes(self, name, content):
+        chunk_names = []
+        for index, offset in enumerate(range(0, len(content), UPLOAD_CHUNK_BYTES)):
+            chunk = content[offset : offset + UPLOAD_CHUNK_BYTES]
+            chunk_name = f"{name}-{index:05d}.b64"
+            encoded = base64.b64encode(chunk).decode("ascii")
+            self.write_text(chunk_name, encoded)
+            chunk_names.append(f"{REMOTE_ROOT}/{chunk_name}")
+        if not chunk_names:
+            raise ValueError("remote binary payload must not be empty")
+        source_files = " ".join(map(shlex.quote, chunk_names))
+        destination = shlex.quote(f"{REMOTE_ROOT}/{name}")
+        result = self.sandbox.run(
+            f"cat {source_files} | base64 -d > {destination}",
+            timeout_ms=self.command_timeout_ms,
+        )
+        _require_remote_success(result, f"upload {name}")
+
+    # run executes one worker action and returns its final JSON object.
+    def run(self, action, timeout_ms=None):
+        if timeout_ms is None:
+            timeout_ms = self.command_timeout_ms
+        command = shlex.join(["python3", f"{REMOTE_ROOT}/worker.py", action])
+        result = self.sandbox.run(
+            command,
+            env={"PYTHONDONTWRITEBYTECODE": "1"},
+            timeout_ms=timeout_ms,
+        )
+        _require_remote_success(result, f"remote {action}")
+        for line in reversed(result.stdout.splitlines()):
+            try:
+                report = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(report, dict):
+                report["provider"] = self.sandbox.provider
+                return report
+        raise RuntimeError(f"remote {action} returned no JSON report")
+
+
+# _require_remote_success preserves bounded worker diagnostics without exposing credentials.
+def _require_remote_success(result, operation):
+    if result.exit_code == 0:
+        return
+    details = (result.stderr or result.stdout).strip()[-4_000:]
+    raise RuntimeError(
+        f"{operation} failed with exit code {result.exit_code}: {details}"
+    )
+
+
+class _ComputeEvaluator:
+    """Evaluate generated candidates in one warm ComputeSDK sandbox."""
+
+    # __init__ snapshots source, constants, and runtime inputs before upload.
     def __init__(self, baseline_source, constants, inputs, settings):
         import torch
+        import triton
 
         self.baseline_source = baseline_source
-        self.chip = settings.chip
-        self.profile = settings.modal_profile
+        self.worker = _ComputeSandbox(
+            settings.compute,
+            settings.chip,
+            {"torch": str(torch.__version__), "triton": str(triton.__version__)},
+        )
         payload = {
             "constants": _cpu_copy(constants),
             "inputs": _cpu_copy(tuple(inputs)),
@@ -503,25 +700,28 @@ class _ModalEvaluator:
         buffer = io.BytesIO()
         torch.save(payload, buffer)
         self.payload = buffer.getvalue()
+        self.chip = settings.chip
 
-    # evaluate invokes only the deployed benchmark function while the agent remains local.
-    def evaluate(self, source):
-        os.environ["MODAL_PROFILE"] = self.profile
+    # __enter__ provisions the track and uploads inputs shared by every candidate.
+    def __enter__(self):
+        self.worker.__enter__()
         try:
-            import modal
-        except ImportError as error:
-            raise RuntimeError("modal is required for sandbox='modal'") from error
+            self.worker.write_text("baseline.py", self.baseline_source)
+            self.worker.write_bytes("payload.pt", self.payload)
+            self.chip = self.worker.chip
+            return self
+        except BaseException:
+            self.worker.__exit__(*sys.exc_info())
+            raise
 
-        function = modal.Function.from_name("tilesmith", "compare_generated")
-        return function.remote(
-            self.baseline_source,
-            source,
-            self.payload,
-            self.chip,
-            WARMUP,
-            BENCH_ITERATIONS,
-            BENCH_SAMPLES,
-        )
+    # __exit__ tears down the remote track after the agent selects its artifact.
+    def __exit__(self, error_type, error, traceback):
+        return self.worker.__exit__(error_type, error, traceback)
+
+    # evaluate uploads only the changing candidate and invokes the trusted worker.
+    def evaluate(self, source):
+        self.worker.write_text("candidate.py", source)
+        return self.worker.run("compare")
 
 
 # _evaluator_server exposes the in-process CUDA evaluator only to a token-authenticated localhost command.
