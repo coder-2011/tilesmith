@@ -1,14 +1,13 @@
 """Run Tilesmith correctness checks and CUDA benchmarks inside a sandbox."""
 
 import importlib.util
-import gzip
 import json
 import os
-import shutil
-import statistics
 import subprocess
 import sys
 from pathlib import Path
+
+from measurement import benchmark_pair, profile_cuda, variant_inputs
 
 
 ROOT = Path(__file__).resolve().parent
@@ -77,115 +76,8 @@ def _metadata(torch, triton):
         "cuda": str(torch.version.cuda),
         "driver": driver,
         "gpu": torch.cuda.get_device_name(),
-        "ncu": shutil.which("ncu"),
-        "nvidia_smi_q_xml": subprocess.check_output(
-            ["nvidia-smi", "-q", "-x"],
-            text=True,
-        ),
         "torch": str(torch.__version__),
         "triton": str(triton.__version__),
-    }
-
-
-# _profile_exports returns the complete Kineto trace plus readable aggregate and memory views.
-def _profile_exports(profiler, prefix):
-    trace_path = ROOT / f"{prefix}-trace.json"
-    memory_path = ROOT / f"{prefix}-memory.raw.json.gz"
-    cpu_stacks_path = ROOT / f"{prefix}-cpu-stacks.txt"
-    device_stacks_path = ROOT / f"{prefix}-device-stacks.txt"
-    profiler.export_chrome_trace(str(trace_path))
-
-    try:
-        averages = profiler.key_averages(
-            group_by_input_shape=True,
-            group_by_stack_n=8,
-            group_by_overload_name=True,
-        )
-    except TypeError:
-        # Older supported PyTorch builds do not expose overload grouping.
-        averages = profiler.key_averages(
-            group_by_input_shape=True,
-            group_by_stack_n=8,
-        )
-    tables = {
-        "self_cpu_time_total": averages.table(
-            sort_by="self_cpu_time_total",
-            row_limit=-1,
-        )
-    }
-    for metric in ("self_device_time_total", "self_cuda_time_total"):
-        try:
-            tables[metric] = averages.table(sort_by=metric, row_limit=-1)
-            break
-        except (AttributeError, KeyError, RuntimeError):
-            continue
-
-    exports = {
-        "chrome_trace": json.loads(trace_path.read_text(encoding="utf-8")),
-        "events": len(profiler.events()),
-        "key_averages": tables,
-    }
-    try:
-        profiler.export_memory_timeline(str(memory_path))
-        with gzip.open(memory_path, "rt", encoding="utf-8") as memory_file:
-            exports["memory_timeline"] = json.load(memory_file)
-    except Exception as error:
-        exports["memory_timeline_error"] = str(error)
-
-    for name, path, metric in (
-        ("cpu_stacks", cpu_stacks_path, "self_cpu_time_total"),
-        ("device_stacks", device_stacks_path, "self_cuda_time_total"),
-    ):
-        try:
-            profiler.export_stacks(str(path), metric)
-            exports[name] = path.read_text(encoding="utf-8")
-        except Exception as error:
-            exports[f"{name}_error"] = str(error)
-    return exports
-
-
-# _profile_cuda captures every PyTorch/Kineto trace and allocator view available in-process.
-def _profile_cuda(torch, function, inputs, prefix):
-    activities = [
-        torch.profiler.ProfilerActivity.CPU,
-        torch.profiler.ProfilerActivity.CUDA,
-    ]
-    torch.cuda.reset_peak_memory_stats()
-    memory_before = dict(torch.cuda.memory_stats())
-    with torch.profiler.profile(
-        activities=activities,
-        profile_memory=True,
-        record_shapes=True,
-        with_flops=True,
-        with_modules=True,
-        with_stack=True,
-    ) as profiler:
-        with torch.profiler.record_function("tilesmith_candidate"):
-            function(list(inputs))
-        torch.cuda.synchronize()
-
-    try:
-        memory_snapshot = torch.cuda.memory_snapshot()
-    except Exception as error:
-        memory_snapshot = {"error": str(error)}
-
-    return {
-        "activities": ["CPU", "CUDA"],
-        "allocator": {
-            "memory_snapshot": memory_snapshot,
-            "stats_after": dict(torch.cuda.memory_stats()),
-            "stats_before": memory_before,
-        },
-        "config": {
-            "profile_memory": True,
-            "record_shapes": True,
-            "with_flops": True,
-            "with_modules": True,
-            "with_stack": True,
-        },
-        "kineto": _profile_exports(profiler, prefix),
-        "peak_memory_allocated": torch.cuda.max_memory_allocated(),
-        "peak_memory_reserved": torch.cuda.max_memory_reserved(),
     }
 
 
@@ -240,32 +132,18 @@ def _check(torch, workload, kernel):
     return case_count
 
 
-# _generated_inputs changes values without changing compiled shapes, dtypes, or strides.
-def _generated_inputs(torch, inputs, variant):
-    values = []
-    for value in inputs:
-        if not torch.is_tensor(value):
-            values.append(value)
-            continue
-        cloned = value.detach().clone(memory_format=torch.preserve_format)
-        if variant == "zero" and (cloned.is_floating_point() or cloned.is_complex()):
-            cloned.zero_()
-        if variant == "high" and (cloned.is_floating_point() or cloned.is_complex()):
-            cloned.mul_(4)
-        values.append(cloned)
-    return tuple(values)
-
-
 # _check_generated compares candidate source with PyTorch's unmodified Inductor wrapper.
 def _check_generated(torch, baseline, candidate, inputs):
     with torch.no_grad():
         for variant in ("normal", "zero", "high"):
             cpu_state = torch.random.get_rng_state()
             cuda_states = torch.cuda.get_rng_state_all()
-            expected = baseline(list(_generated_inputs(torch, inputs, variant)))
+            expected_inputs = variant_inputs(torch, inputs, variant)
+            expected = baseline(list(expected_inputs))
             torch.random.set_rng_state(cpu_state)
             torch.cuda.set_rng_state_all(cuda_states)
-            actual = candidate(list(_generated_inputs(torch, inputs, variant)))
+            actual_inputs = variant_inputs(torch, inputs, variant)
+            actual = candidate(list(actual_inputs))
             torch.testing.assert_close(
                 actual,
                 expected,
@@ -273,55 +151,6 @@ def _check_generated(torch, baseline, candidate, inputs):
                 check_stride=True,
             )
     torch.cuda.synchronize()
-
-
-# _benchmark_pair alternates execution order and reports paired CUDA-event ratios.
-def _benchmark_pair(
-    torch,
-    reference,
-    candidate,
-    inputs,
-    reference_name,
-    warmup,
-    iterations,
-    sample_count,
-):
-    functions = ((reference_name, reference), ("candidate_triton", candidate))
-    with torch.no_grad():
-        for _ in range(warmup):
-            for _, measured in functions:
-                measured(inputs)
-        torch.cuda.synchronize()
-
-        samples = {name: [] for name, _ in functions}
-        for sample in range(sample_count):
-            order = functions if sample % 2 == 0 else tuple(reversed(functions))
-            for name, measured in order:
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                for _ in range(iterations):
-                    measured(inputs)
-                end.record()
-                end.synchronize()
-                samples[name].append(start.elapsed_time(end) / iterations)
-
-    ratios = [
-        candidate_ms / reference_ms
-        for reference_ms, candidate_ms in zip(
-            samples[reference_name], samples["candidate_triton"]
-        )
-    ]
-    return {
-        "benchmark_iterations": iterations,
-        "benchmark_samples": sample_count,
-        "candidate_ms": statistics.median(samples["candidate_triton"]),
-        "candidate_samples_ms": samples["candidate_triton"],
-        f"{reference_name}_ms": statistics.median(samples[reference_name]),
-        f"{reference_name}_samples_ms": samples[reference_name],
-        "score": statistics.median(ratios),
-        "warmup": warmup,
-    }
 
 
 # _extract captures and validates TorchInductor's generated wrapper for the paid fixture.
@@ -382,7 +211,7 @@ def _benchmark_fixture(torch, workload, kernel, request):
     def candidate(values):
         return kernel.call(list(values))
 
-    return _benchmark_pair(
+    return benchmark_pair(
         torch,
         reference,
         candidate,
@@ -414,18 +243,11 @@ def _compare(torch, triton):
     candidate = _load_generated(torch, ROOT / "candidate.py", constants)
     _check_generated(torch, baseline, candidate, inputs)
 
-    # reference and measured preserve the boxed generated-wrapper convention.
-    def reference(values):
-        return baseline(list(values))
-
-    def measured(values):
-        return candidate(list(values))
-
     metadata.update(
-        _benchmark_pair(
+        benchmark_pair(
             torch,
-            reference,
-            measured,
+            baseline,
+            candidate,
             inputs,
             "torch_inductor",
             int(request["warmup"]),
@@ -433,17 +255,13 @@ def _compare(torch, triton):
             int(request["samples"]),
         )
     )
-    metadata["profiling"] = _profile_cuda(
+    metadata["profiling"] = profile_cuda(
         torch,
-        measured,
+        candidate,
         inputs,
+        ROOT,
         "generated-candidate",
     )
-    metadata["profiling_progress"] = [
-        "correctness_complete",
-        "timing_complete",
-        "torch_profile_complete",
-    ]
     metadata["reference"] = "torch_inductor_generated"
     return metadata
 
@@ -475,17 +293,13 @@ def _evaluate_fixture(torch, triton):
         return candidate.call(list(values))
 
     metadata.update(_benchmark_fixture(torch, workload, candidate, request))
-    metadata["profiling"] = _profile_cuda(
+    metadata["profiling"] = profile_cuda(
         torch,
         measured,
         inputs,
+        ROOT,
         "fixture-candidate",
     )
-    metadata["profiling_progress"] = [
-        "correctness_complete",
-        "timing_complete",
-        "torch_profile_complete",
-    ]
     return metadata
 
 

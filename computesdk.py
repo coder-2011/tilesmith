@@ -34,7 +34,6 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import cast
-from urllib.parse import quote
 
 import httpx
 
@@ -160,25 +159,6 @@ class Sandbox:
                 data = _response_object(response)
 
         return _command_result(data)
-
-    def read_text(self, path: str) -> str:
-        """Read one UTF-8 text file from the sandbox."""
-        try:
-            response = _request(
-                self._client,
-                "GET",
-                f"/files/{quote(path, safe='/')}",
-                params={"content": "true"},
-                redactions=self._redactions,
-            )
-        except ComputeSDKError as error:
-            if error.status_code == 404:
-                raise FileNotFoundError(path) from error
-            raise
-        if isinstance(response, str):
-            return response
-        data = _response_object(response)
-        return cast(str, data["content"])
 
     def write_text(self, path: str, content: str) -> None:
         """Write one UTF-8 text file into the sandbox."""

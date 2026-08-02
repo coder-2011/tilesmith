@@ -51,7 +51,6 @@ class _FixtureEvaluator:
         report["profiling"]["nsight_compute"] = self.worker.profile(
             "profile-fixture"
         )
-        report["profiling_progress"].append("nsight_compute_complete")
         return report
 
 
@@ -94,8 +93,6 @@ def _run(args):
 
     if result.model_calls < 2:
         raise RuntimeError("agent did not execute a multi-turn graph")
-    if result.benchmarks < 1:
-        raise RuntimeError("agent did not use benchmark_candidate")
     if result.benchmarks != args.loops:
         raise RuntimeError(
             f"graph completed {result.benchmarks} benchmarks for {args.loops} loops"
@@ -113,7 +110,6 @@ def _run(args):
         json.dumps(
             {
                 "baseline_score": result.baseline_score,
-                "benchmarks": result.benchmarks,
                 "confirmed_score": result.confirmed_score,
                 "improvement": gain,
                 "loops": args.loops,

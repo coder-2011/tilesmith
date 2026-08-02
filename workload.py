@@ -3,9 +3,6 @@ import torch
 
 ATOL = 2e-3
 RTOL = 2e-3
-WARMUP = 25
-BENCH_ITERATIONS = 100
-BENCH_SAMPLES = 7
 SHAPE = (4096, 4096)
 DTYPE = "float16"
 

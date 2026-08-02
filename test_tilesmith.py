@@ -133,9 +133,9 @@ class TilesmithAgentTests(unittest.TestCase):
             for attempt in range(1, 6):
                 candidate = workspace.directory / path.lstrip("/")
                 candidate.write_text(f"candidate-{attempt}\n", encoding="utf-8")
-                _, annotated = workspace.read_candidate(path)
+                workspace.read_candidate(path)
                 if attempt < 5:
-                    path = workspace.prepare_next(annotated)
+                    path = workspace.prepare_next()
 
             attempts = sorted((Path(directory) / "attempts").glob("*.py"))
             bodies = [
