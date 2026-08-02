@@ -1,3 +1,4 @@
+import contextlib
 import sys
 import tempfile
 import unittest
@@ -37,6 +38,8 @@ class _Evaluator:
 
     # evaluate makes numbered and explicitly optimized candidates progressively faster.
     def evaluate(self, source):
+        if "broken" in source:
+            raise RuntimeError("candidate did not compile")
         if "optimized-2" in source:
             return {"profiling": {"events": ["kernel-2"]}, "score": 0.4}
         if "optimized" in source:
@@ -52,18 +55,31 @@ class TilesmithAgentTests(unittest.TestCase):
     # test_backend_preserves_pytorch_configuration keeps Tilesmith from disabling Inductor features.
     def test_backend_preserves_pytorch_configuration(self):
         calls = []
+        patches = []
 
         # fake_compile_fx records the exact boundary without requiring PyTorch on the test host.
         def fake_compile_fx(graph_module, example_inputs, **kwargs):
             calls.append((graph_module, example_inputs, kwargs))
             return "compiled"
 
+        # fake_config_patch records the one cache setting needed to keep the hook reachable.
+        @contextlib.contextmanager
+        def fake_config_patch(**kwargs):
+            patches.append(kwargs)
+            yield
+
         torch_module = ModuleType("torch")
+        functorch_module = ModuleType("torch._functorch")
+        functorch_config_module = ModuleType("torch._functorch.config")
+        functorch_config_module.patch = fake_config_patch
+        functorch_module.config = functorch_config_module
         inductor_module = ModuleType("torch._inductor")
         compile_module = ModuleType("torch._inductor.compile_fx")
         compile_module.compile_fx = fake_compile_fx
         modules = {
             "torch": torch_module,
+            "torch._functorch": functorch_module,
+            "torch._functorch.config": functorch_config_module,
             "torch._inductor": inductor_module,
             "torch._inductor.compile_fx": compile_module,
         }
@@ -76,14 +92,21 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(calls[0][:2], ("graph", ("input",)))
         self.assertEqual(set(calls[0][2]), {"inner_compile"})
         self.assertIs(calls[0][2]["inner_compile"].__self__, backend)
+        self.assertEqual(patches, [{"enable_autograd_cache": False}])
 
     # test_track_enforces_one_new_benchmark_per_loop checks the costly stateful edge cases together.
     def test_track_enforces_one_new_benchmark_per_loop(self):
         evaluator = _Evaluator()
-        track = tilesmith._BenchmarkTrack("baseline\n", {"score": 1.0}, evaluator, 2)
+        track = tilesmith._BenchmarkTrack(
+            "baseline\n",
+            {"reference": "torch_inductor_generated", "score": 1.05},
+            evaluator,
+            2,
+        )
 
         track.start_loop(0)
         baseline = track.benchmark("baseline")
+        rejected = track.benchmark("broken")
         measured = track.benchmark("candidate-7")
         measured["caller_only"] = True
         blocked = track.benchmark("candidate-8")
@@ -92,7 +115,10 @@ class TilesmithAgentTests(unittest.TestCase):
         second = track.benchmark("candidate-8")
 
         self.assertTrue(baseline["cached"])
+        self.assertEqual(baseline["score"], 1.0)
         self.assertEqual(baseline["progress"]["status"], "needs_new_candidate")
+        self.assertFalse(rejected["correct"])
+        self.assertEqual(rejected["progress"]["status"], "needs_new_candidate")
         self.assertAlmostEqual(measured["score"], 0.93)
         self.assertIn("already benchmarked", blocked["error"])
         self.assertTrue(cached["cached"])
@@ -100,6 +126,32 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertAlmostEqual(second["score"], 0.92)
         self.assertEqual(second["progress"]["percent"], 100)
         self.assertEqual(track.benchmarks, 2)
+
+    # test_optimizer_failure_falls_back keeps optional agent infrastructure out of model semantics.
+    def test_optimizer_failure_falls_back(self):
+        calls = []
+
+        # baseline records the boxed input that ordinary Inductor receives.
+        def baseline(inputs):
+            calls.append(inputs)
+            return "baseline"
+
+        kernel = tilesmith._LazyKernel(
+            baseline,
+            "source",
+            {},
+            None,
+            "graph-key",
+        )
+        with (
+            patch.object(kernel, "_install", side_effect=RuntimeError("offline")),
+            self.assertWarnsRegex(UserWarning, "using ordinary Inductor"),
+        ):
+            result = kernel(["input"])
+
+        self.assertEqual(result, "baseline")
+        self.assertEqual(calls, [["input"]])
+        self.assertIs(kernel.installed, baseline)
 
     # test_history_keeps_five_benchmarks proves unrelated tools do not consume the retention budget.
     def test_history_keeps_five_benchmarks(self):

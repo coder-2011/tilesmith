@@ -7,7 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from measurement import assert_candidate_matches, benchmark_pair, profile_cuda
+from measurement import (
+    assert_candidate_matches,
+    benchmark_pair,
+    chip_matches,
+    profile_cuda,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -91,8 +96,8 @@ def _request():
 
 # _validate_environment rejects a sandbox that cannot execute the generated source faithfully.
 def _validate_environment(metadata, request):
-    requested_chip = str(request["chip"]).rstrip("!")
-    if requested_chip.lower() not in metadata["gpu"].lower():
+    requested_chip = str(request["chip"])
+    if not chip_matches(requested_chip, metadata["gpu"]):
         raise RuntimeError(
             f"requested {requested_chip}, sandbox provisioned {metadata['gpu']}"
         )
@@ -313,7 +318,10 @@ def main():
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} {'|'.join(actions)}")
     result = actions[sys.argv[1]](torch, triton)
-    print(json.dumps(result, sort_keys=True))
+    encoded = json.dumps(result, sort_keys=True)
+    # Large traces travel through the file endpoint instead of truncation-prone command output.
+    (ROOT / "result.json").write_text(encoded, encoding="utf-8")
+    print(json.dumps({"result_bytes": len(encoded)}, sort_keys=True))
 
 
 if __name__ == "__main__":

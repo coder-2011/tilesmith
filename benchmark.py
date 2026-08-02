@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -88,7 +89,9 @@ def _run(args):
             skills=tuple(skills),
         )
         track_id = hashlib.sha256(baseline_source.encode()).hexdigest()
-        workspace = settings.cache_dir / "tracks" / f"benchmark-{track_id}"
+        # Paid smoke tests must prove a new agent run instead of inheriting an old fix.
+        run_id = f"benchmark-{track_id}-{time.time_ns()}"
+        workspace = settings.cache_dir / "tracks" / run_id
         result = _run_agent(baseline_source, settings, evaluator, workspace)
 
     if result.model_calls < 2:

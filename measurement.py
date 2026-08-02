@@ -2,10 +2,19 @@
 
 import gzip
 import json
+import re
 import shutil
 import statistics
 import subprocess
 from pathlib import Path
+
+
+# chip_matches compares provider selectors and device names by exact GPU model token.
+def chip_matches(requested, observed):
+    pattern = r"[a-z]+\d+[a-z]*"
+    requested_tokens = set(re.findall(pattern, requested.rstrip("!").lower()))
+    observed_tokens = set(re.findall(pattern, observed.lower()))
+    return bool(requested_tokens & observed_tokens)
 
 
 # variant_inputs clones one compiled input shape and applies the requested correctness values.

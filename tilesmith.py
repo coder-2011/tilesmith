@@ -21,6 +21,7 @@ from typing import TypedDict
 from measurement import (
     assert_candidate_matches,
     benchmark_pair,
+    chip_matches,
     profile_cuda,
     variant_inputs,
 )
@@ -52,6 +53,7 @@ For file tools use /attempts/attempt_XX.py. Bash starts at the workspace root, s
 Use bash only to inspect, diff, and edit source. Do not run generated code, CUDA, timing, package installation, network clients, or benchmark commands through bash.
 Use web search to resolve concrete Triton, PyTorch, or NVIDIA uncertainties, preferring primary documentation and source.
 Each graph loop ends only after one new candidate calls benchmark_candidate(path). The tool is the only authority for compilation, correctness, GPU warmup, profiling, and timing; never invent results. Read its complete profiling packet and progress before the next loop.
+The tool returns timings and profiler summaries inline plus report_path for the complete raw JSON. Use bash tools such as jq on that file when the summary points to a bottleneck that needs deeper inspection.
 Improve its lower-is-better score. Inspect both Triton kernels and the Python launch graph, and make coherent changes rather than broad rewrites.
 Do not detect or bypass the benchmark, weaken correctness, call the reference implementation, or replace a custom kernel with a library implementation.
 The host installs the fastest successfully benchmarked source after a fresh confirmation, so your final response may briefly summarize the work instead of repeating the source.
@@ -132,7 +134,7 @@ def compile(model, *, example_inputs, loops=1, sandbox=None, chip=None):
             device.index if device.index is not None else torch.cuda.current_device()
         )
         device_name = torch.cuda.get_device_name(index)
-        if not _chip_matches(chip, device_name):
+        if not chip_matches(chip, device_name):
             raise ValueError(
                 f"chip={chip!r} does not match local execution device {device_name!r}"
             )
@@ -202,11 +204,6 @@ def _read_compute_config(chip):
     )
 
 
-# _chip_matches accepts a provider selector such as H100 against its full device name.
-def _chip_matches(requested, observed):
-    return requested.rstrip("!").lower() in observed.lower()
-
-
 # _default_skills gives the kernel agent the local API and CUDA guidance when those files exist.
 def _default_skills():
     skill_root = Path.home() / ".codex" / "skills"
@@ -234,15 +231,18 @@ class _Backend:
     def __init__(self, settings):
         self.settings = settings
 
-    # __call__ gives Dynamo's graph to the full Inductor pipeline without overriding PyTorch's configuration.
+    # __call__ gives Dynamo's graph to Inductor while keeping the interception path cache-visible.
     def __call__(self, graph_module, example_inputs):
+        from torch._functorch import config as functorch_config
         from torch._inductor.compile_fx import compile_fx
 
-        return compile_fx(
-            graph_module,
-            example_inputs,
-            inner_compile=self._inner_compile,
-        )
+        # AOTAutograd cache hits bypass inner_compile and would orphan Tilesmith's accepted artifact.
+        with functorch_config.patch(enable_autograd_cache=False):
+            return compile_fx(
+                graph_module,
+                example_inputs,
+                inner_compile=self._inner_compile,
+            )
 
     # _inner_compile first completes an Inductor artifact, then considers its loaded Python wrapper.
     def _inner_compile(self, graph_module, example_inputs, **kwargs):
@@ -295,14 +295,30 @@ class _Backend:
                 "Tilesmith left a wrapped Inductor graph unchanged", stacklevel=2
             )
             return compiled
+        if self.settings.compute is not None and set(compiled.device_idxs) != {0}:
+            warnings.warn(
+                "Tilesmith left a non-cuda:0 graph unchanged because a one-GPU "
+                "sandbox exposes its device as cuda:0",
+                stacklevel=2,
+            )
+            return compiled
 
         constants = CompiledFxGraphConstantsWithGm(graph_module).unwrap(compiled)
+        graph_key = getattr(compiled, "_fx_graph_cache_key", None)
+        if constants and graph_key is None:
+            warnings.warn(
+                "Tilesmith left a constant-bearing graph without a stable Inductor "
+                "cache identity unchanged",
+                stacklevel=2,
+            )
+            return compiled
         source = _with_reference(graph_module.code, compiled.source_code)
         compiled.current_callable = _LazyKernel(
             compiled.current_callable,
             source,
             constants,
             self.settings,
+            graph_key or compiled.cache_key,
         )
         return compiled
 
@@ -321,10 +337,11 @@ def _is_raw_generated_call(compiled):
 
 class _LazyKernel:
     # __init__ defers optimization until real runtime tensors are available for validation and timing.
-    def __init__(self, baseline, source, constants, settings):
+    def __init__(self, baseline, source, constants, settings, graph_key):
         self.baseline = baseline
         self.source = _canonical_source(source)
         self.constants = constants
+        self.graph_key = graph_key
         self.settings = settings
         self.installed = None
         self.lock = threading.Lock()
@@ -334,7 +351,15 @@ class _LazyKernel:
         if self.installed is None:
             with self.lock:
                 if self.installed is None:
-                    self.installed = self._install(inputs)
+                    try:
+                        self.installed = self._install(inputs)
+                    except Exception as error:
+                        warnings.warn(
+                            "Tilesmith optimization failed; using ordinary Inductor: "
+                            f"{_summarize(error)}",
+                            stacklevel=2,
+                        )
+                        self.installed = self.baseline
         return self.installed(inputs)
 
     # _install reuses a validated cache entry or runs the complete agent loop against these runtime inputs.
@@ -356,12 +381,17 @@ class _LazyKernel:
                 else torch.cuda.current_device()
             )
             device_name = torch.cuda.get_device_name(index)
-            if not _chip_matches(self.settings.compute.chip, device_name):
+            if not chip_matches(self.settings.compute.chip, device_name):
                 raise RuntimeError(
                     f"sandbox chip {self.settings.compute.chip!r} does not match "
                     f"execution device {device_name!r}"
                 )
-        cache_key = _cache_key(self.source, self.settings, device)
+        cache_key = _cache_key(
+            self.source,
+            self.settings,
+            device,
+            self.graph_key,
+        )
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
 
         with _cache_lock(self.settings.cache_dir / f"{cache_key}.lock"):
@@ -444,7 +474,7 @@ def _package_version(name):
 
 
 # _cache_key binds an accepted source file to its graph, agent policy, software, and NVIDIA target.
-def _cache_key(source, settings, device):
+def _cache_key(source, settings, device, graph_key):
     import torch
     import triton
 
@@ -457,6 +487,7 @@ def _cache_key(source, settings, device):
         "deepagents": _package_version("deepagents"),
         "device": torch.cuda.get_device_name(index),
         "langchain_openai": _package_version("langchain-openai"),
+        "inductor_graph": graph_key,
         "loops": settings.loops,
         "min_improvement": settings.min_improvement,
         "model": settings.model,
@@ -740,15 +771,12 @@ class _ComputeSandbox:
             timeout_ms=timeout_ms,
         )
         _require_remote_success(result, f"remote {action}")
-        for line in reversed(result.stdout.splitlines()):
-            try:
-                report = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(report, dict):
-                report["provider"] = self.sandbox.provider
-                return report
-        raise RuntimeError(f"remote {action} returned no JSON report")
+        encoded = self.sandbox.read_text(f"{REMOTE_ROOT}/result.json")
+        report = json.loads(encoded)
+        if not isinstance(report, dict):
+            raise RuntimeError(f"remote {action} returned a non-object report")
+        report["provider"] = self.sandbox.provider
+        return report
 
     # profile returns every raw Nsight Compute metric when ncu is installed and permitted.
     def profile(self, action):
@@ -763,7 +791,7 @@ class _ComputeSandbox:
                 "reason": "ncu is not installed in the ComputeSDK template",
             }
 
-        command = shlex.join(
+        profile_command = shlex.join(
             [
                 "ncu",
                 "--set",
@@ -778,18 +806,24 @@ class _ComputeSandbox:
                 action,
             ]
         )
+        output_path = f"{REMOTE_ROOT}/ncu.csv"
+        command = f"{profile_command} > {shlex.quote(output_path)}"
         result = self.sandbox.run(
             command,
             env={"PYTHONDONTWRITEBYTECODE": "1"},
             timeout_ms=self.command_timeout_ms,
         )
+        try:
+            stdout = self.sandbox.read_text(output_path)
+        except FileNotFoundError:
+            stdout = ""
         return {
             "available": True,
             "collected": result.exit_code == 0,
             "command": command,
             "exit_code": result.exit_code,
             "stderr": result.stderr,
-            "stdout": result.stdout,
+            "stdout": stdout,
         }
 
 
@@ -883,6 +917,52 @@ def _summarize(message):
     return message if len(message) <= 4000 else message[-4000:]
 
 
+# _agent_report keeps actionable profiler summaries inline while retaining raw data by path.
+def _agent_report(report):
+    compact = {key: value for key, value in report.items() if key != "profiling"}
+    profiling = report.get("profiling")
+    if not isinstance(profiling, dict):
+        return compact
+
+    summary = {
+        key: profiling[key]
+        for key in (
+            "activities",
+            "config",
+            "peak_memory_allocated",
+            "peak_memory_reserved",
+        )
+        if key in profiling
+    }
+    allocator = profiling.get("allocator")
+    if isinstance(allocator, dict):
+        summary["allocator"] = {
+            key: allocator[key]
+            for key in ("stats_before", "stats_after")
+            if key in allocator
+        }
+    kineto = profiling.get("kineto")
+    if isinstance(kineto, dict):
+        summary["kineto"] = {
+            key: value
+            for key, value in kineto.items()
+            if key in {"events", "key_averages"} or key.endswith("_error")
+        }
+    nsight = profiling.get("nsight_compute")
+    if isinstance(nsight, dict):
+        nsight_summary = {
+            key: value
+            for key, value in nsight.items()
+            if key not in {"stdout", "stderr"}
+        }
+        for stream in ("stdout", "stderr"):
+            if isinstance(nsight.get(stream), str):
+                nsight_summary[f"{stream}_bytes"] = len(nsight[stream].encode())
+        summary["nsight_compute"] = nsight_summary
+    compact["profiling"] = summary
+    return compact
+
+
 class _AttemptWorkspace:
     """Keep five persistent, reference-annotated candidate files for one graph."""
 
@@ -964,6 +1044,7 @@ class _AttemptWorkspace:
             if annotated != source:
                 path.write_text(annotated, encoding="utf-8")
                 os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.latest.touch()
 
     # write_report persists the complete benchmark and profiler packet outside model history.
     def write_report(self, name, report):
@@ -994,6 +1075,9 @@ class _BenchmarkTrack:
     # __init__ pins the trusted baseline and seeds duplicate detection with its exact source.
     def __init__(self, source, baseline_report, evaluator, loops):
         baseline_score = _report_score(baseline_report, "baseline")
+        if baseline_report.get("reference") == "torch_inductor_generated":
+            # A generated wrapper compared with itself defines the production baseline as 1.
+            baseline_score = 1.0
         source_hash = hashlib.sha256(source.encode()).hexdigest()
         self.baseline_score = baseline_score
         self.best_score = baseline_score
@@ -1054,8 +1138,6 @@ class _BenchmarkTrack:
                 }
 
             # Evaluators share one GPU or remote sandbox, so the lock also prevents overlapping timings.
-            self.benchmarks += 1
-            self.loop_complete = True
             print(f"loop {self.loop + 1}/{self.loops}: profiling candidate")
             try:
                 evaluation = self.evaluator.evaluate(candidate)
@@ -1064,10 +1146,13 @@ class _BenchmarkTrack:
                 report = {
                     "correct": False,
                     "error": _summarize(error),
-                    "progress": self._progress("loop_complete"),
+                    "progress": self._progress("needs_new_candidate"),
                     "source_sha256": source_hash,
                 }
             else:
+                # Only a completed correctness, timing, and profiling packet consumes a loop.
+                self.benchmarks += 1
+                self.loop_complete = True
                 previous_best = self.best_score
                 if score < self.best_score:
                     self.best_score = score
@@ -1086,8 +1171,9 @@ class _BenchmarkTrack:
                     "source_sha256": source_hash,
                 }
             self.evaluated[source_hash] = report
+            status = "complete" if self.loop_complete else "candidate rejected"
             print(
-                f"loop {self.loop + 1}/{self.loops} complete: "
+                f"loop {self.loop + 1}/{self.loops} {status}: "
                 f"{report.get('score', report.get('error'))}"
             )
             # The tool may add path metadata, so do not expose the retained report itself.
@@ -1180,6 +1266,7 @@ def _chat_model(settings):
     return ChatOpenAI(
         api_key=api_key,
         base_url=os.environ.get("OPENAI_BASE_URL"),
+        include=["reasoning.encrypted_content"],
         max_retries=6,
         model=settings.model,
         store=False,
@@ -1237,7 +1324,7 @@ def _run_agent(source, settings, evaluator, workspace_dir):
                 f"loop_{track.loop:02d}",
                 report,
             )
-        return json.dumps(report, default=str, sort_keys=True)
+        return json.dumps(_agent_report(report), default=str, sort_keys=True)
 
     # LocalShellBackend adds Deep Agents' execute tool while withholding host credentials.
     backend = LocalShellBackend(
@@ -1248,15 +1335,17 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         },
     )
 
+    middleware = [ContextEditingMiddleware(edits=[_BenchmarkHistoryEdit()])]
+    if "-codex" not in settings.model.lower():
+        # Deep Agents' Codex harness already installs this middleware.
+        middleware.insert(0, TodoListMiddleware())
+
     # Keep the graph free-form while evicting source-heavy benchmark turns beyond the newest five.
     agent = create_deep_agent(
         model=_chat_model(settings),
         tools=[benchmark_candidate, {"type": "web_search"}],
         system_prompt=_agent_instructions(settings, evaluator),
-        middleware=[
-            TodoListMiddleware(),
-            ContextEditingMiddleware(edits=[_BenchmarkHistoryEdit()]),
-        ],
+        middleware=middleware,
         checkpointer=MemorySaver(),
         backend=backend,
         name="tilesmith-kernel-optimizer",

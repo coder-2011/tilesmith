@@ -40,6 +40,9 @@ runtime wrappers. Compilation remains lazy: after PyTorch finishes each eligible
 forward or backward Inductor graph, the first real call asks Tilesmith to improve
 that artifact. Dynamic-shape, mixed-device, multi-GPU, input-mutating,
 non-Triton, and wrapped graphs safely stay on ordinary Inductor.
+Tilesmith bypasses only AOTAutograd's higher-level artifact cache because its
+warm hits skip the generated-source hook; Inductor's FX/code caches remain
+enabled. Agent or sandbox failures warn and fall back to ordinary Inductor.
 
 ## Remote benchmarks
 
@@ -68,6 +71,8 @@ Only benchmarking is remote; the returned callable still runs locally, so its
 CUDA device must match `chip`. `COMPUTESDK_TEMPLATE` must provide that GPU and
 host-compatible PyTorch and Triton versions. Tilesmith keeps one ephemeral
 sandbox warm for the whole graph optimization track, then destroys it.
+Remote optimization currently accepts only local `cuda:0` graphs because a
+one-GPU sandbox exposes its target as `cuda:0`.
 `COMPUTESDK_TRIBUTARY_URL` overrides the gateway and
 `TILESMITH_SANDBOX_TIMEOUT` controls the maximum sandbox lifetime in seconds.
 The pinned gateway protocol currently routes through Modal provider tokens,
@@ -100,16 +105,15 @@ fixed 70-step safety ceiling. Timing repetitions are intentionally internal,
 not user-configurable. The model context retains the five newest benchmark
 payloads without discarding other tool work.
 
-The tool reads the named attempt, restores its trusted FX comment header,
-rejects incorrect source before timing, and returns loop progress, every raw
-timing sample, a complete PyTorch/Kineto Chrome trace, operator summaries,
-stacks, the raw memory timeline, allocator statistics/snapshot, GPU metadata,
-and the exact evaluator chip. ComputeSDK evaluation also runs Nsight Compute's
-full metric set when `ncu` is installed, returning its raw CSV or the complete
-availability/failure result. Every packet is also retained under the graph's
-`profiles/` directory. The host selects the fastest successfully measured
-candidate regardless of the agent's final text and runs a fresh confirmation
-before installation.
+The tool reads the named attempt, restores its trusted FX comment header, and
+rejects incorrect source before timing. Its inline response contains progress,
+every raw timing sample, operator summaries, allocator statistics, GPU metadata,
+and the exact evaluator chip. Complete Chrome traces, stacks, memory timelines,
+allocator snapshots, and Nsight Compute CSV are retained under the graph's
+`profiles/` directory; the response includes the path so the agent can inspect
+raw details without overflowing model context. The host selects the fastest
+successfully measured candidate regardless of the agent's final text and runs a
+fresh confirmation before installation.
 
 Correctness covers normal, zero, and high-magnitude inputs against the original
 TorchInductor callable. Timing uses 25 warmups, alternating baseline/candidate
@@ -138,7 +142,8 @@ nonzero unless the graph is multi-turn, calls the real benchmark tool, removes
 the controlled waste, and freshly confirms at least a 25% speedup. When
 available, the graph also receives the complete local `high-performance-triton`
 and `KernelWiki` skills alongside `check-normal` and `high-performance-cuda`
-guidance.
+guidance. Every paid run uses a fresh persistent track so a prior fixture win
+cannot satisfy a later test.
 
 Ordinary local tests never provision ComputeSDK. Only `benchmark.py run` or an
 uncached `compile(..., sandbox="computesdk", chip=...)` call creates a paid GPU.
