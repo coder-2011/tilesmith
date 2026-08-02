@@ -1,8 +1,42 @@
 # Tilesmith
 
 Tilesmith extracts TorchInductor's generated Triton wrapper, asks an LLM for
-better source, and installs a candidate only after eager-PyTorch correctness and
+better source, and installs a candidate only after reference correctness and
 NVIDIA GPU timing both pass.
+
+## PyTorch API
+
+Run from this checkout on an NVIDIA machine with PyTorch 2.13, Go, and
+CLIProxyAPI configured:
+
+```sh
+export CLIPROXY_CONFIG=/path/to/cliproxy-config.yaml
+export TILESMITH_MODEL=gpt-5.4
+```
+
+```python
+import tilesmith
+
+optimized_model = tilesmith.compile(model, example_inputs=(x,))
+output = optimized_model(x)
+```
+
+`tilesmith.compile` returns a normal `torch.compile` callable, so PyTorch keeps
+the model's output structure and autograd integration. Like `torch.compile`, it
+is lazy: `compile()` validates the example inputs without executing the model,
+and the first real call compiles each eligible Inductor graph and runs the
+agent. Forward and lazy backward graphs use the same integration.
+
+For every graph, Tilesmith checks normal, zero, and high-magnitude inputs
+against the original generated callable before timing warmed CUDA execution.
+It uses 25 warmups and the median of seven 100-iteration CUDA-event samples. An
+optimized callable is installed only after the agent repeats its final
+correctness and speedup confirmation.
+
+Validated artifacts are cached in `~/.cache/tilesmith`. The key includes the
+generated source, PyTorch/Triton/CUDA versions, NVIDIA device, agent settings,
+and loaded skill contents. Input-mutating graphs, non-Triton graphs, and graphs
+with extra Inductor runtime wrappers safely remain on ordinary Inductor.
 
 ## Agent benchmark
 
