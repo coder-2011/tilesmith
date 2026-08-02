@@ -1,0 +1,354 @@
+import contextlib
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import ModuleType
+from typing import Any, ClassVar, Sequence
+from unittest.mock import patch
+
+from langchain_core.language_models.fake_chat_models import (
+    FakeMessagesListChatModel,
+)
+from langchain_core.messages import AIMessage, ToolMessage
+
+import tilesmith
+
+
+class _ToolModel(FakeMessagesListChatModel):
+    """Provide deterministic tool calls while exercising the real Deep Agents graph."""
+
+    seen_tools: ClassVar[set[str]] = set()
+
+    # bind_tools accepts the graph's built-in and Tilesmith tools without changing the script.
+    def bind_tools(self, tools: Sequence[Any], **kwargs):
+        for configured in tools:
+            if isinstance(configured, dict):
+                self.seen_tools.add(configured.get("type", ""))
+            else:
+                self.seen_tools.add(getattr(configured, "name", ""))
+        return self
+
+
+class _Evaluator:
+    """Return deterministic scores for host-policy and graph integration tests."""
+
+    chip = "NVIDIA H100 (sm_90)"
+    execution = "a deterministic test evaluator"
+
+    # evaluate makes numbered and explicitly optimized candidates progressively faster.
+    def evaluate(self, source):
+        if "broken" in source:
+            raise RuntimeError("candidate did not compile")
+        if "optimized-2" in source:
+            return {"profiling": {"events": ["kernel-2"]}, "score": 0.4}
+        if "optimized" in source:
+            return {"profiling": {"events": ["kernel-1"]}, "score": 0.5}
+        if source.startswith("candidate-"):
+            return {"score": 1 - int(source.split("-")[1]) / 100}
+        return {"profiling": {"events": ["baseline"]}, "score": 1.0}
+
+
+class TilesmithAgentTests(unittest.TestCase):
+    """Cover the graph boundary and the host-owned benchmark invariants."""
+
+    # test_backend_preserves_pytorch_configuration keeps Tilesmith from disabling Inductor features.
+    def test_backend_preserves_pytorch_configuration(self):
+        calls = []
+        patches = []
+
+        # fake_compile_fx records the exact boundary without requiring PyTorch on the test host.
+        def fake_compile_fx(graph_module, example_inputs, **kwargs):
+            calls.append((graph_module, example_inputs, kwargs))
+            return "compiled"
+
+        # fake_config_patch records the one cache setting needed to keep the hook reachable.
+        @contextlib.contextmanager
+        def fake_config_patch(**kwargs):
+            patches.append(kwargs)
+            yield
+
+        torch_module = ModuleType("torch")
+        functorch_module = ModuleType("torch._functorch")
+        functorch_config_module = ModuleType("torch._functorch.config")
+        functorch_config_module.patch = fake_config_patch
+        functorch_module.config = functorch_config_module
+        inductor_module = ModuleType("torch._inductor")
+        compile_module = ModuleType("torch._inductor.compile_fx")
+        compile_module.compile_fx = fake_compile_fx
+        modules = {
+            "torch": torch_module,
+            "torch._functorch": functorch_module,
+            "torch._functorch.config": functorch_config_module,
+            "torch._inductor": inductor_module,
+            "torch._inductor.compile_fx": compile_module,
+        }
+        backend = tilesmith._Backend(settings=None)
+
+        with patch.dict(sys.modules, modules):
+            result = backend("graph", ("input",))
+
+        self.assertEqual(result, "compiled")
+        self.assertEqual(calls[0][:2], ("graph", ("input",)))
+        self.assertEqual(set(calls[0][2]), {"inner_compile"})
+        self.assertIs(calls[0][2]["inner_compile"].__self__, backend)
+        self.assertEqual(patches, [{"enable_autograd_cache": False}])
+
+    # test_track_enforces_one_new_benchmark_per_loop checks the costly stateful edge cases together.
+    def test_track_enforces_one_new_benchmark_per_loop(self):
+        evaluator = _Evaluator()
+        track = tilesmith._BenchmarkTrack(
+            "baseline\n",
+            {"reference": "torch_inductor_generated", "score": 1.05},
+            evaluator,
+            2,
+        )
+
+        track.start_loop(0)
+        baseline = track.benchmark("baseline")
+        rejected = track.benchmark("broken")
+        measured = track.benchmark("candidate-7")
+        measured["caller_only"] = True
+        blocked = track.benchmark("candidate-8")
+        track.start_loop(1)
+        cached = track.benchmark("candidate-7")
+        second = track.benchmark("candidate-8")
+
+        self.assertTrue(baseline["cached"])
+        self.assertEqual(baseline["score"], 1.0)
+        self.assertEqual(baseline["progress"]["status"], "needs_new_candidate")
+        self.assertFalse(rejected["correct"])
+        self.assertEqual(rejected["progress"]["status"], "needs_new_candidate")
+        self.assertAlmostEqual(measured["score"], 0.93)
+        self.assertIn("already benchmarked", blocked["error"])
+        self.assertTrue(cached["cached"])
+        self.assertNotIn("caller_only", cached)
+        self.assertAlmostEqual(second["score"], 0.92)
+        self.assertEqual(second["progress"]["percent"], 100)
+        self.assertEqual(track.benchmarks, 2)
+
+    # test_optimizer_failure_falls_back keeps optional agent infrastructure out of model semantics.
+    def test_optimizer_failure_falls_back(self):
+        calls = []
+
+        # baseline records the boxed input that ordinary Inductor receives.
+        def baseline(inputs):
+            calls.append(inputs)
+            return "baseline"
+
+        kernel = tilesmith._LazyKernel(
+            baseline,
+            "source",
+            {},
+            None,
+            "graph-key",
+        )
+        with (
+            patch.object(kernel, "_install", side_effect=RuntimeError("offline")),
+            self.assertWarnsRegex(UserWarning, "using ordinary Inductor"),
+        ):
+            result = kernel(["input"])
+
+        self.assertEqual(result, "baseline")
+        self.assertEqual(calls, [["input"]])
+        self.assertIs(kernel.installed, baseline)
+
+    # test_history_keeps_five_benchmarks proves unrelated tools do not consume the retention budget.
+    def test_history_keeps_five_benchmarks(self):
+        messages = []
+        for attempt in range(6):
+            benchmark_id = f"benchmark-{attempt}"
+            read_id = f"read-{attempt}"
+            messages.extend(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "benchmark_candidate",
+                                "args": {"path": f"/attempts/attempt_{attempt:02d}.py"},
+                                "id": benchmark_id,
+                                "type": "tool_call",
+                            },
+                            {
+                                "name": "read_file",
+                                "args": {"path": "/kernel.py"},
+                                "id": read_id,
+                                "type": "tool_call",
+                            },
+                        ],
+                    ),
+                    ToolMessage(
+                        content=f"report-{attempt}",
+                        name="benchmark_candidate",
+                        tool_call_id=benchmark_id,
+                    ),
+                    ToolMessage(
+                        content="kernel source",
+                        name="read_file",
+                        tool_call_id=read_id,
+                    ),
+                ]
+            )
+
+        tilesmith._BenchmarkHistoryEdit().apply(messages, count_tokens=lambda _: 0)
+
+        benchmark_results = messages[1::3]
+        read_results = messages[2::3]
+        self.assertEqual(
+            [message.content for message in benchmark_results],
+            ["[cleared]", *[f"report-{attempt}" for attempt in range(1, 6)]],
+        )
+        self.assertEqual(messages[0].tool_calls[0]["args"], {})
+        self.assertTrue(
+            all(message.content == "kernel source" for message in read_results)
+        )
+
+    # test_attempt_workspace_rotates_five_files checks source lineage and reference repair together.
+    def test_attempt_workspace_rotates_five_files(self):
+        source = tilesmith._with_reference(
+            "def forward(self, x):\n    return x",
+            "def call(args):\n    return args\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = tilesmith._AttemptWorkspace(Path(directory), source)
+            path = workspace.prepare_next()
+            for attempt in range(1, 6):
+                candidate = workspace.directory / path.lstrip("/")
+                candidate.write_text(f"candidate-{attempt}\n", encoding="utf-8")
+                workspace.read_candidate(path)
+                if attempt < 5:
+                    path = workspace.prepare_next()
+
+            attempts = sorted((Path(directory) / "attempts").glob("*.py"))
+            bodies = [
+                tilesmith._split_reference(path.read_text())[1] for path in attempts
+            ]
+            self.assertEqual(
+                [path.name for path in attempts],
+                [f"attempt_{i:02d}.py" for i in range(5)],
+            )
+            self.assertEqual(bodies, [f"candidate-{i}\n" for i in range(1, 6)])
+            self.assertTrue(
+                all(
+                    path.read_text().startswith(tilesmith.REFERENCE_START)
+                    for path in attempts
+                )
+            )
+
+    # test_real_graph_installs_measured_file proves LangGraph retries an unbenchmarked loop.
+    def test_real_graph_installs_measured_source(self):
+        _ToolModel.seen_tools.clear()
+        optimized = 'def call(args):\n    return "optimized"\n'
+        optimized_2 = 'def call(args):\n    return "optimized-2"\n'
+        model = _ToolModel(
+            responses=[
+                AIMessage(content="still planning"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {
+                                "command": "bash -lc 'test -f attempts/attempt_01.py'"
+                            },
+                            "id": "execute-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {
+                                "file_path": "/attempts/attempt_01.py",
+                                "content": optimized,
+                            },
+                            "id": "write-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "benchmark_candidate",
+                            "args": {"path": "/attempts/attempt_01.py"},
+                            "id": "benchmark-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="done"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {
+                                "file_path": "/attempts/attempt_02.py",
+                                "content": optimized_2,
+                            },
+                            "id": "write-2",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "benchmark_candidate",
+                            "args": {"path": "/attempts/attempt_02.py"},
+                            "id": "benchmark-2",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="done"),
+            ]
+        )
+        settings = tilesmith._Settings(
+            cache_dir=Path("/tmp"),
+            compute=None,
+            loops=2,
+            min_improvement=0.01,
+            model="test",
+            skills=(),
+            timeout=10.0,
+        )
+        source = tilesmith._with_reference(
+            "def forward(self, x):\n    return x",
+            "def call(args):\n    return args\n",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(tilesmith, "_chat_model", return_value=model):
+                result = tilesmith._run_agent(
+                    source,
+                    settings,
+                    _Evaluator(),
+                    Path(directory) / "track",
+                )
+            attempts = sorted((Path(directory) / "track" / "attempts").glob("*.py"))
+            reports = sorted((Path(directory) / "track" / "profiles").glob("*.json"))
+
+        self.assertIn(optimized_2, result.source)
+        self.assertEqual(result.benchmarks, 2)
+        self.assertEqual(result.model_calls, 8)
+        self.assertEqual(result.confirmed_score, 0.4)
+        self.assertEqual(len(attempts), 5)
+        self.assertEqual(
+            [path.name for path in reports],
+            ["baseline.json", "loop_00.json", "loop_01.json"],
+        )
+        self.assertTrue(
+            {"execute", "web_search", "write_file"} <= _ToolModel.seen_tools
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
