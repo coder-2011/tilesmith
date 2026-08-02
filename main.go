@@ -45,13 +45,27 @@ type settings struct {
 	timeout        time.Duration
 }
 
-// chatResponse contains the only fields used from an OpenAI-compatible chat response.
-type chatResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
+// responseOutput contains the text parts for one Responses API output item.
+type responseOutput struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+// responsesResponse accepts both canonical responses and CLIProxy's completed-event wrapper.
+type responsesResponse struct {
+	Output   []responseOutput `json:"output"`
+	Response struct {
+		Output []responseOutput `json:"output"`
+	} `json:"response"`
+}
+
+// modelsResponse contains the model identifiers reported by CLIProxyAPI.
+type modelsResponse struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
 }
 
 // main reports a single actionable error and leaves orchestration to run.
@@ -93,7 +107,7 @@ func run() error {
 		return nil
 	}
 
-	baseURL, apiKey, err := startProxy(ctx, cfg.config)
+	baseURL, apiKey, err := startProxy(ctx, cfg.config, cfg.model)
 	if err != nil {
 		return err
 	}
@@ -208,8 +222,8 @@ func parseSettings() (settings, error) {
 	return cfg, nil
 }
 
-// startProxy embeds CLIProxyAPI on a private temporary port and returns its chat endpoint base URL.
-func startProxy(ctx context.Context, configPath string) (string, string, error) {
+// startProxy embeds CLIProxyAPI and waits until its asynchronous model registry is ready.
+func startProxy(ctx context.Context, configPath, model string) (string, string, error) {
 	cfg, absolutePath, err := loadProxyConfig(configPath)
 	if err != nil {
 		return "", "", err
@@ -270,7 +284,60 @@ func startProxy(ctx context.Context, configPath string) (string, string, error) 
 	if apiKey == "" && len(cfg.APIKeys) > 0 {
 		apiKey = cfg.APIKeys[0]
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d", port), apiKey, nil
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	if err := waitForModel(ctx, client, baseURL, apiKey, model, 30*time.Second); err != nil {
+		return "", "", err
+	}
+	return baseURL, apiKey, nil
+}
+
+// waitForModel polls the authenticated model list because the server-ready hook precedes model registration.
+func waitForModel(ctx context.Context, client *http.Client, baseURL, apiKey, model string, timeout time.Duration) error {
+	readyContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	lastError := errors.New("model is not registered")
+	for {
+		request, err := http.NewRequestWithContext(readyContext, http.MethodGet, baseURL+"/v1/models", nil)
+		if err != nil {
+			return fmt.Errorf("create model readiness request: %w", err)
+		}
+		if apiKey != "" {
+			request.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		response, err := client.Do(request)
+		if err != nil {
+			lastError = err
+		} else {
+			body, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+			response.Body.Close()
+			switch {
+			case readErr != nil:
+				lastError = readErr
+			case response.StatusCode < 200 || response.StatusCode >= 300:
+				lastError = fmt.Errorf("proxy returned %s: %s", response.Status, summarize(string(body)))
+			default:
+				var models modelsResponse
+				if err := json.Unmarshal(body, &models); err != nil {
+					lastError = err
+				} else {
+					for _, available := range models.Data {
+						if available.ID == model {
+							return nil
+						}
+					}
+				}
+			}
+		}
+
+		select {
+		case <-readyContext.Done():
+			return fmt.Errorf("model %q did not appear in /v1/models: %w", model, lastError)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // loadProxyConfig expands its auth directory without allowing the SDK loader to rewrite the original file.
@@ -324,9 +391,18 @@ func propose(ctx context.Context, client *http.Client, baseURL, apiKey, model st
 	userPrompt := fmt.Sprintf("Current best score: %.6g\nLast observation: %s\n\n--- SOURCE START ---\n%s\n--- SOURCE END ---", score, feedback, source)
 	payload := map[string]any{
 		"model": model,
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userPrompt},
+		"store": false,
+		"input": []map[string]any{
+			{
+				"type":    "message",
+				"role":    "developer",
+				"content": []map[string]string{{"type": "input_text", "text": systemPrompt}},
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": []map[string]string{{"type": "input_text", "text": userPrompt}},
+			},
 		},
 	}
 	body, err := json.Marshal(payload)
@@ -334,7 +410,7 @@ func propose(ctx context.Context, client *http.Client, baseURL, apiKey, model st
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -356,16 +432,25 @@ func propose(ctx context.Context, client *http.Client, baseURL, apiKey, model st
 		return nil, fmt.Errorf("proxy returned %s: %s", response.Status, summarize(string(responseBody)))
 	}
 
-	var result chatResponse
+	var result responsesResponse
 	if err := json.Unmarshal(responseBody, &result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	if len(result.Choices) == 0 {
-		return nil, errors.New("model returned no choices")
+	items := result.Output
+	if len(items) == 0 {
+		items = result.Response.Output
 	}
-	candidate := unwrapCode(result.Choices[0].Message.Content)
+	var output strings.Builder
+	for _, item := range items {
+		for _, content := range item.Content {
+			if content.Type == "output_text" {
+				output.WriteString(content.Text)
+			}
+		}
+	}
+	candidate := unwrapCode(output.String())
 	if len(candidate) == 0 {
-		return nil, errors.New("model returned empty source")
+		return nil, fmt.Errorf("model returned empty source: %s", summarize(string(responseBody)))
 	}
 	return candidate, nil
 }

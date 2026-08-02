@@ -1,27 +1,57 @@
 # Tilesmith
 
-Tilesmith asks an LLM to improve a generated Triton Python file, but installs a
-candidate only after it passes a user-owned correctness check and produces a
-confirmed benchmark improvement.
+Tilesmith extracts TorchInductor's generated Triton wrapper, asks an LLM for
+better source, and installs a candidate only after eager-PyTorch correctness and
+NVIDIA GPU timing both pass.
 
-The first version is intentionally a post-processing command, not a new
-TorchInductor backend. Point it at the generated file after the normal backend
-has emitted Triton:
+## Run
+
+Authenticate Modal, then extract `generated.py` from the included RMSNorm
+workload on an NVIDIA L4:
 
 ```sh
-go run . \
-  -kernel generated.py \
-  -check 'python verify.py' \
-  -bench 'python bench.py' \
-  -config /path/to/cliproxy-config.yaml \
-  -model your-model
+modal setup
+modal run -q modal_app.py --action extract
 ```
 
-Both Python commands receive the candidate path in `TILESMITH_KERNEL`.
-`-check` must exit nonzero for any incorrect candidate. `-bench` should warm up,
-use GPU timing, and print one finite positive lower-is-better score on its last
-line. Tilesmith runs it three times and compares medians by default.
+Point Tilesmith at CLIProxyAPI and run one optimization attempt:
 
-Use `-iterations 0` to verify the Python commands and measure only the baseline.
-`CLIPROXY_CONFIG`, `TILESMITH_MODEL`, and `TILESMITH_PROXY_KEY` provide the
-corresponding flag/config defaults.
+```sh
+export CLIPROXY_CONFIG=/path/to/cliproxy-config.yaml
+export TILESMITH_MODEL=gpt-5.4
+
+go run . \
+  -kernel generated.py \
+  -check 'modal run -q modal_app.py --action check' \
+  -bench 'modal run -q modal_app.py --action bench' \
+  -iterations 1 \
+  -trials 1 \
+  -timeout 20m
+```
+
+The Python commands receive each candidate in `TILESMITH_KERNEL`. The harness
+copies that source and the local workload into Modal, checks normal, zero, and
+high-magnitude inputs against eager PyTorch, warms the GPU, and reports the
+median of seven CUDA-event samples. A named Modal Volume persists the
+source-hashed TorchInductor/Triton cache between runs.
+
+`workload.py` is also the customization interface. Replace `model()` and
+`make_inputs()` with a self-contained workload; optionally provide
+`make_cases()`, `ATOL`, `RTOL`, and the benchmark constants shown in the example.
+
+## Using the result
+
+The installed file is the callable Python actually benchmarks. On an NVIDIA
+machine, load it before the training loop and call its generated interface:
+
+```python
+import runpy
+
+kernel = runpy.run_path("generated.py")
+(output,) = kernel["call"]([input_tensor])
+```
+
+Replacing `generated.py` does not mutate a `torch.compile` callable that is
+already loaded in memory. Restart that process or load the optimized artifact
+before use. Tilesmith atomically replaces the file only after a confirmed
+speedup; otherwise the original remains unchanged.
