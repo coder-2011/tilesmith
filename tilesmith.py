@@ -15,7 +15,6 @@ import sys
 import tempfile
 import threading
 import warnings
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,8 +25,7 @@ BENCH_ITERATIONS = 100
 BENCH_SAMPLES = 7
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_SKILL_BYTES = 8 * 1024 * 1024
-RECENT_ATTEMPTS = 5
-GRAPH_RECURSION_LIMIT = 200
+BENCHMARK_HISTORY = 5
 OPTIMIZE_LOCK = threading.Lock()
 REMOTE_ROOT = "/tmp/tilesmith"
 REMOTE_COMMAND_TIMEOUT_MS = 20 * 60 * 1000
@@ -58,13 +56,12 @@ class _ComputeConfig:
 
 @dataclass(frozen=True)
 class _Settings:
+    benchmark_budget: int
     cache_dir: Path
     chip: str
     compute: _ComputeConfig | None
-    iterations: int
     min_improvement: float
     model: str
-    sandbox: str
     skills: tuple[str, ...]
     timeout: float
 
@@ -78,7 +75,6 @@ class _AgentResult:
     confirmed_score: float
     benchmarks: int
     model_calls: int
-    web_searches: int
 
 
 # compile returns a normal torch.compile callable while routing Inductor graphs through Tilesmith.
@@ -126,11 +122,11 @@ def compile(model, *, example_inputs, sandbox=None, chip=None):
 
 # _read_settings keeps the public API small while making expensive agent choices explicit in the environment.
 def _read_settings(sandbox, chip):
-    iterations = int(os.environ.get("TILESMITH_ITERATIONS", "4"))
+    benchmark_budget = int(os.environ.get("TILESMITH_BENCHMARKS", "4"))
     min_improvement = float(os.environ.get("TILESMITH_MIN_IMPROVEMENT", "0.01"))
     timeout = float(os.environ.get("TILESMITH_TIMEOUT", "1200"))
-    if iterations < 0:
-        raise ValueError("TILESMITH_ITERATIONS must be non-negative")
+    if benchmark_budget < 0:
+        raise ValueError("TILESMITH_BENCHMARKS must be non-negative")
     if min_improvement < 0 or min_improvement >= 1:
         raise ValueError("TILESMITH_MIN_IMPROVEMENT must be in [0, 1)")
     if timeout <= 0:
@@ -138,15 +134,14 @@ def _read_settings(sandbox, chip):
 
     cache_default = Path.home() / ".cache" / "tilesmith"
     return _Settings(
+        benchmark_budget=benchmark_budget,
         cache_dir=Path(os.environ.get("TILESMITH_CACHE_DIR", cache_default))
         .expanduser()
         .resolve(),
         chip=chip,
         compute=_read_compute_config() if sandbox == "computesdk" else None,
-        iterations=iterations,
         min_improvement=min_improvement,
         model=os.environ.get("TILESMITH_MODEL", "gpt-5.5"),
-        sandbox=sandbox or "local",
         skills=tuple(_default_skills()),
         timeout=timeout,
     )
@@ -365,11 +360,11 @@ def _cache_key(source, settings, device):
         "cuda": str(torch.version.cuda),
         "deepagents": _package_version("deepagents"),
         "device": torch.cuda.get_device_name(index),
-        "iterations": settings.iterations,
+        "benchmark_budget": settings.benchmark_budget,
         "langchain_openai": _package_version("langchain-openai"),
         "min_improvement": settings.min_improvement,
         "model": settings.model,
-        "sandbox": settings.sandbox,
+        "remote_benchmark": settings.compute is not None,
         "sandbox_chip": settings.chip,
         "sandbox_gateway": (
             settings.compute.gateway_url if settings.compute is not None else ""
@@ -787,7 +782,7 @@ def _summarize(message):
 
 
 class _BenchmarkTrack:
-    """Serialize benchmark calls and retain only the five newest observations."""
+    """Own measured candidates, the benchmark budget, and fastest valid source."""
 
     # __init__ pins the trusted baseline and seeds duplicate detection with its exact source.
     def __init__(self, source, baseline_report, evaluator, budget):
@@ -800,7 +795,6 @@ class _BenchmarkTrack:
         self.evaluator = evaluator
         self.benchmarks = 0
         self.lock = threading.Lock()
-        self.recent = deque(maxlen=RECENT_ATTEMPTS)
         self.evaluated = {
             source_hash: {
                 **baseline_report,
@@ -867,16 +861,9 @@ class _BenchmarkTrack:
             )
             return self._respond(report)
 
-    # _respond appends one compact record and exposes only the bounded recent track.
+    # _respond serializes evaluator evidence at the graph's tool boundary.
     def _respond(self, report):
-        recent = {
-            key: report[key]
-            for key in ("correct", "error", "score", "source_sha256")
-            if key in report
-        }
-        self.recent.append(recent)
-        response = {**report, "recent_attempts": list(self.recent)}
-        return json.dumps(response, default=str, sort_keys=True)
+        return json.dumps(report, default=str, sort_keys=True)
 
 
 # _agent_instructions joins trusted local performance guidance with the concrete GPU target.
@@ -910,7 +897,7 @@ def _chat_model(settings):
             "Tilesmith requires deepagents and langchain-openai"
         ) from error
 
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("TILESMITH_PROXY_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required to run the Tilesmith agent")
     return ChatOpenAI(
@@ -924,36 +911,13 @@ def _chat_model(settings):
     )
 
 
-# _count_web_searches finds unique hosted-search calls across native and normalized blocks.
-def _count_web_searches(messages):
-    calls = set()
-    for message_index, message in enumerate(messages):
-        blocks = []
-        if isinstance(getattr(message, "content", None), list):
-            blocks.extend(message.content)
-        # LangChain may expose the same provider block through a normalized view; IDs deduplicate it.
-        blocks.extend(getattr(message, "content_blocks", []))
-        for block_index, block in enumerate(blocks):
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type")
-            is_search = block_type == "web_search_call"
-            is_search |= (
-                block_type == "server_tool_call" and block.get("name") == "web_search"
-            )
-            if is_search:
-                identifier = block.get("id") or (message_index, block_index)
-                calls.add(identifier)
-    return len(calls)
-
-
 # _run_agent executes one permissive Deep Agents graph and installs only a freshly confirmed win.
 def _run_agent(source, settings, evaluator):
     baseline_report = evaluator.evaluate(source)
     baseline_score = _report_score(baseline_report, "baseline")
     print(f"baseline: {baseline_score:.6g}")
-    if settings.iterations == 0:
-        return _AgentResult(source, baseline_score, baseline_score, 0, 0, 0)
+    if settings.benchmark_budget == 0:
+        return _AgentResult(source, baseline_score, baseline_score, 0, 0)
 
     try:
         from deepagents import create_deep_agent
@@ -974,7 +938,7 @@ def _run_agent(source, settings, evaluator):
         source,
         baseline_report,
         evaluator,
-        settings.iterations,
+        settings.benchmark_budget,
     )
 
     @tool
@@ -994,7 +958,7 @@ def _run_agent(source, settings, evaluator):
                 edits=[
                     ClearToolUsesEdit(
                         trigger=0,
-                        keep=RECENT_ATTEMPTS,
+                        keep=BENCHMARK_HISTORY,
                         clear_tool_inputs=True,
                         exclude_tools=(
                             "ls",
@@ -1015,7 +979,6 @@ def _run_agent(source, settings, evaluator):
         checkpointer=MemorySaver(),
         name="tilesmith-kernel-optimizer",
     )
-    thread_id = hashlib.sha256(f"{evaluator.chip}\n{source}".encode()).hexdigest()
     result = graph.invoke(
         {
             "files": {"/kernel.py": create_file_data(source)},
@@ -1024,23 +987,16 @@ def _run_agent(source, settings, evaluator):
                     "role": "user",
                     "content": (
                         f"Optimize /kernel.py for {evaluator.chip}. You may benchmark "
-                        f"up to {settings.iterations} unique candidates."
+                        f"up to {settings.benchmark_budget} unique candidates."
                     ),
                 }
             ],
         },
-        config={
-            "configurable": {"thread_id": thread_id},
-            "recursion_limit": GRAPH_RECURSION_LIMIT,
-        },
+        config={"configurable": {"thread_id": "kernel"}},
     )
     messages = result.get("messages", [])
     model_calls = sum(getattr(message, "type", "") == "ai" for message in messages)
-    web_searches = _count_web_searches(messages)
-    print(
-        f"graph: {model_calls} model calls, {track.benchmarks} benchmarks, "
-        f"{web_searches} web searches"
-    )
+    print(f"graph: {model_calls} model calls, {track.benchmarks} benchmarks")
 
     if track.best_source == source:
         print("no improvement; original left unchanged")
@@ -1050,7 +1006,6 @@ def _run_agent(source, settings, evaluator):
             baseline_score,
             track.benchmarks,
             model_calls,
-            web_searches,
         )
 
     try:
@@ -1064,7 +1019,6 @@ def _run_agent(source, settings, evaluator):
             baseline_score,
             track.benchmarks,
             model_calls,
-            web_searches,
         )
 
     confirmed_gain = (baseline_score - confirmed_score) / baseline_score
@@ -1078,7 +1032,6 @@ def _run_agent(source, settings, evaluator):
             confirmed_score,
             track.benchmarks,
             model_calls,
-            web_searches,
         )
     print(
         f"installed {confirmed_gain:.2%} improvement: "
@@ -1090,5 +1043,4 @@ def _run_agent(source, settings, evaluator):
         confirmed_score,
         track.benchmarks,
         model_calls,
-        web_searches,
     )

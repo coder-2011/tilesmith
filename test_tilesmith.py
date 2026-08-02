@@ -1,4 +1,3 @@
-import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -38,24 +37,18 @@ class _Evaluator:
 class TilesmithAgentTests(unittest.TestCase):
     """Cover the graph boundary and the host-owned benchmark invariants."""
 
-    # test_track_bounds_history_and_reuses_results checks the costly stateful edge cases together.
-    def test_track_bounds_history_and_reuses_results(self):
+    # test_track_reuses_results_and_enforces_budget checks the costly stateful edge cases together.
+    def test_track_reuses_results_and_enforces_budget(self):
         evaluator = _Evaluator()
-        track = tilesmith._BenchmarkTrack("baseline\n", {"score": 1.0}, evaluator, 7)
+        track = tilesmith._BenchmarkTrack("baseline\n", {"score": 1.0}, evaluator, 1)
 
-        for attempt in range(1, 8):
-            track.benchmark(f"candidate-{attempt}")
-
-        self.assertEqual(track.benchmarks, 7)
-        self.assertEqual(len(track.recent), 5)
-        oldest_hash = hashlib.sha256(b"candidate-3\n").hexdigest()
-        self.assertEqual(track.recent[0]["source_sha256"], oldest_hash)
-
+        measured = json.loads(track.benchmark("candidate-7"))
         cached = json.loads(track.benchmark("candidate-7"))
         exhausted = json.loads(track.benchmark("candidate-8"))
+        self.assertAlmostEqual(measured["score"], 0.93)
         self.assertTrue(cached["cached"])
         self.assertIn("budget exhausted", exhausted["error"])
-        self.assertEqual(track.benchmarks, 7)
+        self.assertEqual(track.benchmarks, 1)
 
     # test_real_graph_installs_measured_source proves Deep Agents executes the benchmark tool loop.
     def test_real_graph_installs_measured_source(self):
@@ -63,14 +56,7 @@ class TilesmithAgentTests(unittest.TestCase):
         model = _ToolModel(
             responses=[
                 AIMessage(
-                    content=[
-                        {
-                            "type": "server_tool_call",
-                            "name": "web_search",
-                            "id": "search-1",
-                            "args": {"query": "Triton H100 optimization"},
-                        }
-                    ],
+                    content="",
                     tool_calls=[
                         {
                             "name": "benchmark_candidate",
@@ -84,13 +70,12 @@ class TilesmithAgentTests(unittest.TestCase):
             ]
         )
         settings = tilesmith._Settings(
+            benchmark_budget=2,
             cache_dir=Path("/tmp"),
             chip="",
             compute=None,
-            iterations=2,
             min_improvement=0.01,
             model="test",
-            sandbox="local",
             skills=(),
             timeout=10.0,
         )
@@ -105,7 +90,6 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(result.source, optimized)
         self.assertEqual(result.benchmarks, 1)
         self.assertEqual(result.model_calls, 2)
-        self.assertEqual(result.web_searches, 1)
         self.assertEqual(result.confirmed_score, 0.5)
 
 

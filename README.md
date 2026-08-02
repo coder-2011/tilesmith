@@ -79,12 +79,12 @@ The source starts at `/kernel.py`; filesystem and subagent work stays inside
 that graph state and has no host shell access.
 
 The graph chooses its own optimization workflow. The host restricts only the
-expensive boundary: `TILESMITH_ITERATIONS` is the number of unique candidate
+expensive boundary: `TILESMITH_BENCHMARKS` is the number of unique candidate
 benchmarks, defaulting to four. Duplicate source reuses its prior result. The
-tool retains the five newest observations, rejects incorrect source before
-timing, and reports the exact evaluator chip and source hash. The host selects
-the fastest successfully measured candidate regardless of the agent's final
-text and runs a fresh confirmation before installation.
+graph retains the five newest benchmark payloads. The tool rejects incorrect
+source before timing and reports the exact evaluator chip and source hash. The
+host selects the fastest successfully measured candidate regardless of the
+agent's final text and runs a fresh confirmation before installation.
 
 Correctness covers normal, zero, and high-magnitude inputs against the original
 TorchInductor callable. Timing uses 25 warmups, alternating baseline/candidate
@@ -94,8 +94,8 @@ required fractional confirmed speedup.
 
 Validated artifacts are cached in `~/.cache/tilesmith`. The key includes the
 generated source, PyTorch/Triton/CUDA and Deep Agents versions, NVIDIA device,
-sandbox and chip, ComputeSDK gateway/template, agent settings, and loaded skill
-contents. Repeating the same compile track loads that exact accepted source;
+ComputeSDK configuration and chip, agent settings, and loaded skill contents.
+Repeating the same compile track loads that exact accepted source;
 PyTorch and Triton's normal cache then avoids rebuilding it.
 
 ## H100 agent benchmark
@@ -109,9 +109,9 @@ python3 benchmark.py run --benchmarks 4
 
 It provisions one H100, extracts the included `4096 × 4096` fp16 RMSNorm, and
 creates a correct baseline with four redundant Triton launches. It exits
-nonzero unless the graph is multi-turn, uses hosted web search, calls the real
-benchmark tool, removes the controlled waste, and freshly confirms at least a
-25% speedup. When available, the graph also receives the local `check-normal`
+nonzero unless the graph is multi-turn, calls the real benchmark tool, removes
+the controlled waste, and freshly confirms at least a 25% speedup. When
+available, the graph also receives the local `check-normal`
 and `high-performance-cuda` guidance.
 
 Ordinary local tests never provision ComputeSDK. Only `benchmark.py run` or an

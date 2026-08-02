@@ -79,11 +79,10 @@ def _run(args):
         evaluator = _FixtureEvaluator(worker)
         settings = replace(
             _read_settings(None, ""),
+            benchmark_budget=args.benchmarks,
             chip=evaluator.chip,
-            iterations=args.benchmarks,
             min_improvement=0.05,
             model=args.model,
-            sandbox="computesdk",
             skills=tuple(skills),
         )
         result = _run_agent(baseline_source, settings, evaluator)
@@ -92,8 +91,6 @@ def _run(args):
         raise RuntimeError("agent did not execute a multi-turn graph")
     if result.benchmarks < 1:
         raise RuntimeError("agent did not use benchmark_candidate")
-    if result.web_searches < 1:
-        raise RuntimeError("agent did not use hosted web search")
     if result.source == baseline_source:
         raise RuntimeError("agent did not catch the controlled optimization")
 
@@ -112,7 +109,6 @@ def _run(args):
                 "improvement": gain,
                 "model_calls": result.model_calls,
                 "skill_files": len(skills),
-                "web_searches": result.web_searches,
             },
             sort_keys=True,
         )
@@ -129,13 +125,7 @@ def _parse_args():
     run_parser = commands.add_parser(
         "run", help="run the complete Deep Agents benchmark"
     )
-    run_parser.add_argument(
-        "--benchmarks",
-        "--attempts",
-        dest="benchmarks",
-        type=int,
-        default=4,
-    )
+    run_parser.add_argument("--benchmarks", type=int, default=4)
     run_parser.add_argument("--chip", default="H100")
     run_parser.add_argument("--expected-improvement", type=float, default=0.25)
     run_parser.add_argument("--launches", type=int, default=4)
