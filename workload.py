@@ -6,6 +6,8 @@ RTOL = 2e-3
 WARMUP = 25
 BENCH_ITERATIONS = 100
 BENCH_SAMPLES = 7
+SHAPE = (4096, 4096)
+DTYPE = "float16"
 
 
 # model is the eager PyTorch reference that TorchInductor will lower to Triton.
@@ -19,7 +21,7 @@ def model(x):
 # make_inputs returns the fixed-shape input used for extraction and timing.
 def make_inputs(device):
     torch.manual_seed(0)
-    x = torch.randn((4096, 4096), device=device, dtype=torch.float16)
+    x = torch.randn(SHAPE, device=device, dtype=getattr(torch, DTYPE))
     return (x,)
 
 

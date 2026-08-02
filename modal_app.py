@@ -11,7 +11,7 @@ import modal
 
 app = modal.App("tilesmith")
 image = modal.Image.debian_slim(python_version="3.12").uv_pip_install("torch==2.13.0")
-cache = modal.Volume.from_name("tilesmith-torchinductor-cache", create_if_missing=True)
+cache = modal.Volume.from_name("tilesmith-h100-cache", create_if_missing=True)
 
 
 # _load_module imports one self-contained Python file under a unique module name.
@@ -41,11 +41,15 @@ def _outputs(value):
 
 # _metadata records the exact software and NVIDIA device used for each result.
 def _metadata(torch, triton):
+    capability = torch.cuda.get_device_capability()
     driver = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
         text=True,
     ).strip()
     return {
+        "cache_policy": "warm",
+        "clock_policy": "Modal default",
+        "compute_capability": f"{capability[0]}.{capability[1]}",
         "cuda": str(torch.version.cuda),
         "driver": driver,
         "gpu": torch.cuda.get_device_name(),
@@ -135,8 +139,8 @@ def _benchmark(torch, workload, kernel):
     return statistics.median(samples), samples
 
 
-# run_gpu extracts, checks, or benchmarks one generated wrapper on an NVIDIA L4.
-@app.function(image=image, gpu="L4", timeout=1200, volumes={"/cache": cache})
+# run_gpu extracts, checks, or benchmarks one generated wrapper on an NVIDIA H100.
+@app.function(image=image, gpu="H100", timeout=1200, volumes={"/cache": cache})
 def run_gpu(action, workload_source, kernel_source):
     debug_dir = tempfile.mkdtemp(prefix="tilesmith-debug-")
     os.environ["TORCH_COMPILE_DEBUG"] = "1"
@@ -151,6 +155,10 @@ def run_gpu(action, workload_source, kernel_source):
         workload_path.write_text(workload_source, encoding="utf-8")
         workload = _load_module("tilesmith_workload", workload_path)
         metadata = _metadata(torch, triton)
+        if hasattr(workload, "SHAPE"):
+            metadata["shape"] = list(workload.SHAPE)
+        if hasattr(workload, "DTYPE"):
+            metadata["dtype"] = workload.DTYPE
 
         if action == "extract":
             metadata["source"] = _extract(torch, workload, debug_dir)
@@ -161,7 +169,7 @@ def run_gpu(action, workload_source, kernel_source):
         kernel_path.write_text(kernel_source, encoding="utf-8")
         kernel = _load_module("tilesmith_candidate", kernel_path)
         metadata["cases"] = _check(torch, workload, kernel)
-        if action == "bench":
+        if action in {"bench", "evaluate"}:
             milliseconds, samples = _benchmark(torch, workload, kernel)
             metadata["milliseconds"] = milliseconds
             metadata["samples_ms"] = samples
@@ -172,8 +180,8 @@ def run_gpu(action, workload_source, kernel_source):
 # main transfers local source to Modal so remote code never depends on local absolute paths.
 @app.local_entrypoint()
 def main(action: str = "extract", workload: str = "workload.py", kernel: str = "generated.py"):
-    if action not in {"extract", "check", "bench"}:
-        raise ValueError("action must be extract, check, or bench")
+    if action not in {"extract", "check", "bench", "evaluate"}:
+        raise ValueError("action must be extract, check, bench, or evaluate")
 
     workload_source = Path(workload).read_text(encoding="utf-8")
     kernel_path = Path(os.environ.get("TILESMITH_KERNEL", kernel))
@@ -186,5 +194,5 @@ def main(action: str = "extract", workload: str = "workload.py", kernel: str = "
         source = result.pop("source")
         kernel_path.write_text(source, encoding="utf-8")
     print(json.dumps(result, sort_keys=True))
-    if action == "bench":
+    if action in {"bench", "evaluate"}:
         print(f"{result['milliseconds']:.9g}")

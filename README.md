@@ -4,36 +4,51 @@ Tilesmith extracts TorchInductor's generated Triton wrapper, asks an LLM for
 better source, and installs a candidate only after eager-PyTorch correctness and
 NVIDIA GPU timing both pass.
 
-## Run
+## Agent benchmark
 
-Authenticate Modal, then extract `generated.py` from the included RMSNorm
-workload on an NVIDIA L4:
-
-```sh
-modal setup
-modal run -q modal_app.py --action extract
-```
-
-Point Tilesmith at CLIProxyAPI and run one optimization attempt:
+Configure a Modal profile and CLIProxyAPI, then run the explicit paid benchmark:
 
 ```sh
+modal token set --profile tilesmith-h100
+export MODAL_PROFILE=tilesmith-h100
 export CLIPROXY_CONFIG=/path/to/cliproxy-config.yaml
 export TILESMITH_MODEL=gpt-5.4
 
+python3 benchmark.py run
+```
+
+This deploys one scale-to-zero H100 evaluator, extracts the included RMSNorm
+through TorchInductor at `4096 × 4096` fp16, and creates a correct smoke-test
+baseline with four redundant launches. The agent makes four conversational model
+calls, retaining every proposed source and evaluator result, and exits nonzero
+unless it confirms at least a 25% improvement. This controlled fixture proves
+the agent can find an obvious win; its speedup is not a claim about unmodified
+TorchInductor output.
+
+Ordinary `go test ./...` never invokes Modal. Only `benchmark.py run` provisions
+the paid GPU.
+
+## Manual use
+
+Deploy the evaluator and extract `generated.py` from your workload:
+
+```sh
+modal deploy modal_app.py
+modal run -q modal_app.py --action extract
+
 go run . \
   -kernel generated.py \
-  -check 'modal run -q modal_app.py --action check' \
-  -bench 'modal run -q modal_app.py --action bench' \
-  -iterations 1 \
-  -trials 1 \
+  -evaluate 'python3 benchmark.py evaluate --profile tilesmith-h100 --workload workload.py' \
+  -iterations 4 \
   -timeout 20m
 ```
 
-The Python commands receive each candidate in `TILESMITH_KERNEL`. The harness
-copies that source and the local workload into Modal, checks normal, zero, and
-high-magnitude inputs against eager PyTorch, warms the GPU, and reports the
+The evaluator receives each candidate in `TILESMITH_KERNEL`. It copies that
+source and the local workload into Modal, checks normal, zero, and
+high-magnitude inputs against eager PyTorch, warms the H100, and reports the
 median of seven CUDA-event samples. A named Modal Volume persists the
-source-hashed TorchInductor/Triton cache between runs.
+source-hashed TorchInductor/Triton cache between runs. Credentials stay in the
+Modal profile and are never written into this repository.
 
 `workload.py` is also the customization interface. Replace `model()` and
 `make_inputs()` with a self-contained workload; optionally provide
