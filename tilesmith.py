@@ -25,17 +25,25 @@ BENCH_ITERATIONS = 100
 BENCH_SAMPLES = 7
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_SKILL_BYTES = 8 * 1024 * 1024
-BENCHMARK_HISTORY = 5
+ATTEMPT_FILES = 5
+BENCHMARK_HISTORY = ATTEMPT_FILES
 OPTIMIZE_LOCK = threading.Lock()
 REMOTE_ROOT = "/tmp/tilesmith"
 REMOTE_COMMAND_TIMEOUT_MS = 20 * 60 * 1000
 UPLOAD_CHUNK_BYTES = 384 * 1024  # Divisible by 3 so base64 chunks concatenate.
+REFERENCE_START = "# --- TILESMITH PYTORCH FX REFERENCE (NOT EXECUTED) ---"
+REFERENCE_END = "# --- END TILESMITH PYTORCH FX REFERENCE ---"
 
 AGENT_PROMPT = """You optimize generated TorchInductor Triton Python.
-The current complete source is in /kernel.py. Preserve its call(args) ABI and exact semantics.
-Use the graph's planning, scratch-file, subagent, and web-search capabilities whenever useful; choose your own workflow.
+Preserve the generated wrapper's call(args) ABI, output layouts, strides, dtypes, aliasing, and exact semantics.
+Your persistent per-graph workspace is /attempts and contains exactly five rolling Python files named attempt_00.py through attempt_04.py.
+Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize or execute that reference block; preserve it so you can relate generated kernels to PyTorch operations.
+The user message identifies the next attempt file. It is already copied from the most recently benchmarked source. Edit that file instead of starting over. After attempt_04.py, the host discards the oldest contents, shifts the other attempts down, and reuses attempt_04.py.
+Use the graph's planning, file editing, bash, subagent, and web-search capabilities whenever useful; choose your own workflow.
+For file tools use /attempts/attempt_XX.py. Bash starts at the workspace root, so use attempts/attempt_XX.py there. Work only inside this workspace and do not create other Python files.
+Use bash only to inspect, diff, and edit source. Do not run generated code, CUDA, timing, package installation, network clients, or benchmark commands through bash.
 Use web search to resolve concrete Triton, PyTorch, or NVIDIA uncertainties, preferring primary documentation and source.
-Call benchmark_candidate with every complete candidate you want checked. The tool owns compilation, correctness, GPU warmup, and timing; never invent results.
+Call benchmark_candidate(path) with the attempt file for every complete candidate you want checked. This tool is the only authority for compilation, correctness, GPU warmup, and timing; never invent results.
 Improve its lower-is-better score. Inspect both Triton kernels and the Python launch graph, and make coherent changes rather than broad rewrites.
 Do not detect or bypass the benchmark, weaken correctness, call the reference implementation, or replace a custom kernel with a library implementation.
 The host installs the fastest successfully benchmarked source after a fresh confirmation, so your final response may briefly summarize the work instead of repeating the source.
@@ -190,6 +198,13 @@ def _default_skills():
     cuda_root = skill_root / "high-performance-cuda"
     paths = [
         skill_root / "check-normal" / "SKILL.md",
+        skill_root / "high-performance-triton" / "SKILL.md",
+        Path.home()
+        / "Documents"
+        / "kernel-design-agents"
+        / "skills"
+        / "KernelWiki"
+        / "SKILL.md",
         cuda_root / "SKILL.md",
         cuda_root / "references" / "core-principles.md",
         cuda_root / "references" / "autotuning-and-benchmarking.md",
@@ -268,9 +283,10 @@ class _Backend:
             return compiled
 
         constants = CompiledFxGraphConstantsWithGm(graph_module).unwrap(compiled)
+        source = _with_reference(graph_module.code, compiled.source_code)
         compiled.current_callable = _LazyKernel(
             compiled.current_callable,
-            compiled.source_code,
+            source,
             constants,
             self.settings,
         )
@@ -342,12 +358,22 @@ class _LazyKernel:
                         with _ComputeEvaluator(
                             self.source, self.constants, inputs, self.settings
                         ) as evaluator:
-                            result = _run_agent(self.source, self.settings, evaluator)
+                            result = _run_agent(
+                                self.source,
+                                self.settings,
+                                evaluator,
+                                self.settings.cache_dir / "tracks" / cache_key,
+                            )
                     else:
                         evaluator = _Evaluator(
                             self.baseline, self.constants, inputs, device
                         )
-                        result = _run_agent(self.source, self.settings, evaluator)
+                        result = _run_agent(
+                            self.source,
+                            self.settings,
+                            evaluator,
+                            self.settings.cache_dir / "tracks" / cache_key,
+                        )
                 cached = _write_cache(
                     self.settings.cache_dir,
                     cache_key,
@@ -364,6 +390,34 @@ def _canonical_source(source):
     if first_line.startswith("# AOT ID:"):
         return remainder if separator else ""
     return source
+
+
+# _with_reference places the current FX/PyTorch program above executable generated source as comments.
+def _with_reference(reference, source):
+    source = _canonical_source(source)
+    commented = "\n".join(
+        f"# {line}" if line else "#" for line in reference.splitlines()
+    )
+    return (
+        f"{REFERENCE_START}\n"
+        "# Captured from graph_module.code for this compiled graph.\n"
+        f"{commented}\n"
+        f"{REFERENCE_END}\n\n"
+        f"{source}"
+    )
+
+
+# _split_reference separates Tilesmith's trusted comment header from executable candidate source.
+def _split_reference(source):
+    if not source.startswith(f"{REFERENCE_START}\n"):
+        return "", source
+    boundary = source.find(f"{REFERENCE_END}\n")
+    if boundary < 0:
+        return "", source
+    boundary += len(REFERENCE_END) + 1
+    while boundary < len(source) and source[boundary] == "\n":
+        boundary += 1
+    return source[:boundary], source[boundary:]
 
 
 # _package_version records agent-runtime drift without making zero-iteration compilation import it.
@@ -527,6 +581,7 @@ class _Evaluator:
         self.chip = (
             f"{torch.cuda.get_device_name(index)} (sm_{capability[0]}{capability[1]})"
         )
+        self.execution = "the calling process on its local NVIDIA GPU"
 
     # evaluate rejects incorrect source before returning an interleaved CUDA-event comparison.
     def evaluate(self, source):
@@ -758,6 +813,7 @@ class _ComputeEvaluator:
         torch.save(payload, buffer)
         self.payload = buffer.getvalue()
         self.chip = settings.compute.chip
+        self.execution = "one warm ComputeSDK GPU sandbox"
 
     # __enter__ provisions the track and uploads inputs shared by every candidate.
     def __enter__(self):
@@ -810,6 +866,94 @@ def _unwrap_source(content):
 def _summarize(message):
     message = str(message).strip()
     return message if len(message) <= 4000 else message[-4000:]
+
+
+class _AttemptWorkspace:
+    """Keep five persistent, reference-annotated candidate files for one graph."""
+
+    # __init__ restores the newest prior attempt or creates five baseline-backed slots.
+    def __init__(self, directory, source):
+        self.directory = Path(directory)
+        self.attempts = self.directory / "attempts"
+        self.baseline = source
+        self.paths = [
+            self.attempts / f"attempt_{index:02d}.py" for index in range(ATTEMPT_FILES)
+        ]
+        self.header, _ = _split_reference(source)
+        if not self.header:
+            raise ValueError("agent source is missing its PyTorch FX reference header")
+
+        self.attempts.mkdir(parents=True, exist_ok=True)
+        existing = [path for path in self.paths if path.is_file()]
+        latest = (
+            max(existing, key=lambda path: path.stat().st_mtime_ns)
+            if existing
+            else self.paths[0]
+        )
+        for path in self.paths:
+            if not path.exists():
+                path.write_text(source, encoding="utf-8")
+        # Filling an incomplete track updates mtimes, so restore the actual prior cursor.
+        latest.touch()
+        self.latest = latest
+
+    # prepare_next copies the latest attempt into the next slot and rotates after attempt_04.
+    def prepare_next(self, source=None):
+        if source is None:
+            source = self.latest.read_text(encoding="utf-8")
+        source = self._annotate(source)
+        latest_index = self.paths.index(self.latest)
+        if latest_index == ATTEMPT_FILES - 1:
+            contents = [path.read_text(encoding="utf-8") for path in self.paths[1:]]
+            for path, content in zip(self.paths[:-1], contents):
+                path.write_text(self._annotate(content), encoding="utf-8")
+            next_path = self.paths[-1]
+        else:
+            next_path = self.paths[latest_index + 1]
+        next_path.write_text(source, encoding="utf-8")
+        self.latest = next_path
+        return self._virtual(next_path)
+
+    # read_candidate validates the managed path and restores the immutable reference header.
+    def read_candidate(self, path):
+        normalized = f"/{path.lstrip('/')}"
+        allowed = {self._virtual(candidate): candidate for candidate in self.paths}
+        if normalized not in allowed:
+            names = ", ".join(allowed)
+            raise ValueError(f"path must be one of: {names}")
+        candidate = allowed[normalized]
+        source = self._annotate(candidate.read_text(encoding="utf-8"))
+        candidate.write_text(source, encoding="utf-8")
+        self.latest = candidate
+        return normalized, source
+
+    # normalize_all repairs comment headers without changing which attempt is newest.
+    def normalize_all(self):
+        self.attempts.mkdir(parents=True, exist_ok=True)
+        fallback = (
+            self.latest.read_text(encoding="utf-8")
+            if self.latest.is_file()
+            else self.baseline
+        )
+        for path in self.paths:
+            if not path.exists():
+                path.write_text(self._annotate(fallback), encoding="utf-8")
+                continue
+            stat = path.stat()
+            source = path.read_text(encoding="utf-8")
+            annotated = self._annotate(source)
+            if annotated != source:
+                path.write_text(annotated, encoding="utf-8")
+                os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    # _annotate replaces any model-edited reference block with the trusted original.
+    def _annotate(self, source):
+        _, body = _split_reference(source)
+        return f"{self.header}{body}"
+
+    # _virtual returns the stable path exposed by Deep Agents' virtual filesystem.
+    def _virtual(self, path):
+        return f"/attempts/{path.name}"
 
 
 class _BenchmarkTrack:
@@ -933,9 +1077,19 @@ class _BenchmarkHistoryEdit:
             )
 
 
-# _agent_instructions joins trusted local performance guidance with the concrete GPU target.
-def _agent_instructions(settings, chip):
-    sections = [AGENT_PROMPT, f"Target GPU: {chip}."]
+# _agent_instructions joins trusted guidance with the evaluator's actual GPU placement.
+def _agent_instructions(settings, evaluator):
+    sections = [
+        AGENT_PROMPT,
+        (
+            "Execution facts:\n"
+            "- The Deep Agents graph, file tools, bash, subagents, and web search run "
+            "in the calling process.\n"
+            f"- Trusted candidate evaluation runs in {evaluator.execution}.\n"
+            f"- The evaluator observed this exact target: {evaluator.chip}.\n"
+            "- Only benchmark_candidate executes candidates on that target."
+        ),
+    ]
     total = 0
     for configured_path in settings.skills:
         path = Path(configured_path).expanduser().resolve()
@@ -979,7 +1133,7 @@ def _chat_model(settings):
 
 
 # _run_agent executes one permissive Deep Agents graph and installs only a freshly confirmed win.
-def _run_agent(source, settings, evaluator):
+def _run_agent(source, settings, evaluator, workspace_dir):
     baseline_report = evaluator.evaluate(source)
     baseline_score = _report_score(baseline_report, "baseline")
     print(f"baseline: {baseline_score:.6g}")
@@ -988,7 +1142,7 @@ def _run_agent(source, settings, evaluator):
 
     try:
         from deepagents import create_deep_agent
-        from deepagents.backends.utils import create_file_data
+        from deepagents.backends import LocalShellBackend
         from langchain.agents.middleware import (
             ContextEditingMiddleware,
             TodoListMiddleware,
@@ -1006,40 +1160,71 @@ def _run_agent(source, settings, evaluator):
         evaluator,
         settings.benchmark_budget,
     )
+    workspace = _AttemptWorkspace(workspace_dir, source)
+    next_path = workspace.prepare_next()
 
     @tool
-    def benchmark_candidate(source: str) -> str:
-        """Correctness-check and accurately GPU-benchmark complete replacement source."""
+    def benchmark_candidate(path: str) -> str:
+        """Correctness-check and accurately GPU-benchmark one managed attempt file."""
 
-        return track.benchmark(source)
+        try:
+            attempt_path, candidate = workspace.read_candidate(path)
+        except (OSError, UnicodeError, ValueError) as error:
+            return json.dumps(
+                {"correct": False, "error": _summarize(error)},
+                sort_keys=True,
+            )
+
+        previous_benchmarks = track.benchmarks
+        report = json.loads(track.benchmark(candidate))
+        report["attempt_path"] = attempt_path
+        if track.benchmarks > previous_benchmarks:
+            if track.benchmarks < track.budget:
+                report["next_path"] = workspace.prepare_next(candidate)
+        else:
+            report["next_path"] = attempt_path
+        return json.dumps(report, default=str, sort_keys=True)
+
+    # LocalShellBackend adds Deep Agents' execute tool while withholding host credentials.
+    backend = LocalShellBackend(
+        root_dir=workspace.directory,
+        env={
+            "PATH": os.environ.get("PATH", os.defpath),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
 
     # Keep the graph free-form while evicting source-heavy benchmark turns beyond the newest five.
     graph = create_deep_agent(
         model=_chat_model(settings),
         tools=[benchmark_candidate, {"type": "web_search"}],
-        system_prompt=_agent_instructions(settings, evaluator.chip),
+        system_prompt=_agent_instructions(settings, evaluator),
         middleware=[
             TodoListMiddleware(),
             ContextEditingMiddleware(edits=[_BenchmarkHistoryEdit()]),
         ],
         checkpointer=MemorySaver(),
+        backend=backend,
         name="tilesmith-kernel-optimizer",
     )
-    result = graph.invoke(
-        {
-            "files": {"/kernel.py": create_file_data(source)},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        f"Optimize /kernel.py for {evaluator.chip}. You may benchmark "
-                        f"up to {settings.benchmark_budget} unique candidates."
-                    ),
-                }
-            ],
-        },
-        config={"configurable": {"thread_id": "kernel"}},
-    )
+    try:
+        result = graph.invoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Optimize {next_path} for {evaluator.chip}. The file is "
+                            "a copy of the latest attempt. You may benchmark "
+                            f"up to {settings.benchmark_budget} unique candidates."
+                        ),
+                    }
+                ],
+            },
+            config={"configurable": {"thread_id": workspace.directory.name}},
+        )
+    finally:
+        workspace.normalize_all()
     messages = result.get("messages", [])
     model_calls = sum(getattr(message, "type", "") == "ai" for message in messages)
     print(f"graph: {model_calls} model calls, {track.benchmarks} benchmarks")

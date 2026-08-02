@@ -72,18 +72,29 @@ but Tilesmith does not import or configure Modal itself.
 
 ## Agent graph
 
-Each uncached Triton graph gets a Deep Agents `CompiledStateGraph` with an
-ephemeral filesystem, scratch tools, context management, a general-purpose
-subagent, hosted web search, and the real `benchmark_candidate(source)` tool.
-The source starts at `/kernel.py`; filesystem and subagent work stays inside
-that graph state and has no host shell access.
+Each uncached Triton graph gets a Deep Agents `CompiledStateGraph` with file
+tools, local bash, context management, a general-purpose subagent, hosted web
+search, and the real `benchmark_candidate(path)` tool. The graph works in five
+persistent rolling files at
+`~/.cache/tilesmith/tracks/<graph-key>/attempts/attempt_00.py` through
+`attempt_04.py`. Each file starts with the current PyTorch FX graph as comments,
+followed by the executable Inductor/Triton wrapper. The next attempt is copied
+from the last one; after `attempt_04.py`, the oldest contents are discarded and
+the remaining four shift down.
+
+Bash receives only a minimal environment without API credentials and is
+instructed to work in that graph directory. Deep Agents' `LocalShellBackend` is
+still host shell access, not an operating-system security sandbox; use
+Tilesmith only with models and workloads you trust. Candidate execution remains
+exclusive to the benchmark tool.
 
 The graph chooses its own optimization workflow. The host restricts only the
 expensive boundary: `TILESMITH_BENCHMARKS` is the number of unique candidate
 benchmarks, defaulting to four. Duplicate source reuses its prior result. The
 model context retains the five newest benchmark payloads without discarding
-other tool work. The tool rejects incorrect source before timing and reports
-the exact evaluator chip and source hash. The host selects the fastest
+other tool work. The tool reads the named attempt, restores its trusted FX
+comment header, rejects incorrect source before timing, and reports the exact
+evaluator chip and source hash. The host selects the fastest
 successfully measured candidate regardless of the agent's final text and runs
 a fresh confirmation before installation.
 
@@ -112,8 +123,9 @@ It provisions one H100, extracts the included `4096 × 4096` fp16 RMSNorm, and
 creates a correct baseline with four redundant Triton launches. It exits
 nonzero unless the graph is multi-turn, calls the real benchmark tool, removes
 the controlled waste, and freshly confirms at least a 25% speedup. When
-available, the graph also receives the local `check-normal`
-and `high-performance-cuda` guidance.
+available, the graph also receives the complete local `high-performance-triton`
+and `KernelWiki` skills alongside `check-normal` and `high-performance-cuda`
+guidance.
 
 Ordinary local tests never provision ComputeSDK. Only `benchmark.py run` or an
 uncached `compile(..., sandbox="computesdk", chip=...)` call creates a paid GPU.

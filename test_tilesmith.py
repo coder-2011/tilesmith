@@ -1,7 +1,8 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, ClassVar, Sequence
 from unittest.mock import patch
 
 from langchain_core.language_models.fake_chat_models import (
@@ -15,8 +16,15 @@ import tilesmith
 class _ToolModel(FakeMessagesListChatModel):
     """Provide deterministic tool calls while exercising the real Deep Agents graph."""
 
+    seen_tools: ClassVar[set[str]] = set()
+
     # bind_tools accepts the graph's built-in and Tilesmith tools without changing the script.
     def bind_tools(self, tools: Sequence[Any], **kwargs):
+        for configured in tools:
+            if isinstance(configured, dict):
+                self.seen_tools.add(configured.get("type", ""))
+            else:
+                self.seen_tools.add(getattr(configured, "name", ""))
         return self
 
 
@@ -24,6 +32,7 @@ class _Evaluator:
     """Return deterministic scores for host-policy and graph integration tests."""
 
     chip = "NVIDIA H100 (sm_90)"
+    execution = "a deterministic test evaluator"
 
     # evaluate makes numbered and explicitly optimized candidates progressively faster.
     def evaluate(self, source):
@@ -63,7 +72,7 @@ class TilesmithAgentTests(unittest.TestCase):
                         tool_calls=[
                             {
                                 "name": "benchmark_candidate",
-                                "args": {"source": f"candidate-{attempt}"},
+                                "args": {"path": f"/attempts/attempt_{attempt:02d}.py"},
                                 "id": benchmark_id,
                                 "type": "tool_call",
                             },
@@ -101,8 +110,41 @@ class TilesmithAgentTests(unittest.TestCase):
             all(message.content == "kernel source" for message in read_results)
         )
 
-    # test_real_graph_installs_measured_source proves Deep Agents executes the benchmark tool loop.
+    # test_attempt_workspace_rotates_five_files checks source lineage and reference repair together.
+    def test_attempt_workspace_rotates_five_files(self):
+        source = tilesmith._with_reference(
+            "def forward(self, x):\n    return x",
+            "def call(args):\n    return args\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = tilesmith._AttemptWorkspace(Path(directory), source)
+            path = workspace.prepare_next()
+            for attempt in range(1, 6):
+                candidate = workspace.directory / path.lstrip("/")
+                candidate.write_text(f"candidate-{attempt}\n", encoding="utf-8")
+                _, annotated = workspace.read_candidate(path)
+                if attempt < 5:
+                    path = workspace.prepare_next(annotated)
+
+            attempts = sorted((Path(directory) / "attempts").glob("*.py"))
+            bodies = [
+                tilesmith._split_reference(path.read_text())[1] for path in attempts
+            ]
+            self.assertEqual(
+                [path.name for path in attempts],
+                [f"attempt_{i:02d}.py" for i in range(5)],
+            )
+            self.assertEqual(bodies, [f"candidate-{i}\n" for i in range(1, 6)])
+            self.assertTrue(
+                all(
+                    path.read_text().startswith(tilesmith.REFERENCE_START)
+                    for path in attempts
+                )
+            )
+
+    # test_real_graph_installs_measured_file proves Deep Agents editing, search, shell, and benchmark wiring.
     def test_real_graph_installs_measured_source(self):
+        _ToolModel.seen_tools.clear()
         optimized = 'def call(args):\n    return "optimized"\n'
         model = _ToolModel(
             responses=[
@@ -110,8 +152,35 @@ class TilesmithAgentTests(unittest.TestCase):
                     content="",
                     tool_calls=[
                         {
+                            "name": "execute",
+                            "args": {
+                                "command": "bash -lc 'test -f attempts/attempt_01.py'"
+                            },
+                            "id": "execute-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {
+                                "file_path": "/attempts/attempt_01.py",
+                                "content": optimized,
+                            },
+                            "id": "write-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
                             "name": "benchmark_candidate",
-                            "args": {"source": optimized},
+                            "args": {"path": "/attempts/attempt_01.py"},
                             "id": "benchmark-1",
                             "type": "tool_call",
                         }
@@ -129,18 +198,29 @@ class TilesmithAgentTests(unittest.TestCase):
             skills=(),
             timeout=10.0,
         )
+        source = tilesmith._with_reference(
+            "def forward(self, x):\n    return x",
+            "def call(args):\n    return args\n",
+        )
 
-        with patch.object(tilesmith, "_chat_model", return_value=model):
-            result = tilesmith._run_agent(
-                "def call(args):\n    return args\n",
-                settings,
-                _Evaluator(),
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(tilesmith, "_chat_model", return_value=model):
+                result = tilesmith._run_agent(
+                    source,
+                    settings,
+                    _Evaluator(),
+                    Path(directory) / "track",
+                )
+            attempts = sorted((Path(directory) / "track" / "attempts").glob("*.py"))
 
-        self.assertEqual(result.source, optimized)
+        self.assertIn(optimized, result.source)
         self.assertEqual(result.benchmarks, 1)
-        self.assertEqual(result.model_calls, 2)
+        self.assertEqual(result.model_calls, 4)
         self.assertEqual(result.confirmed_score, 0.5)
+        self.assertEqual(len(attempts), 5)
+        self.assertTrue(
+            {"execute", "web_search", "write_file"} <= _ToolModel.seen_tools
+        )
 
 
 if __name__ == "__main__":

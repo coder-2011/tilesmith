@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 from dataclasses import replace
@@ -10,6 +11,7 @@ from tilesmith import (
     _read_compute_config,
     _read_settings,
     _run_agent,
+    _with_reference,
 )
 
 
@@ -40,6 +42,7 @@ class _FixtureEvaluator:
     def __init__(self, worker):
         self.worker = worker
         self.chip = worker.chip
+        self.execution = "one warm ComputeSDK GPU sandbox"
 
     # evaluate uploads one candidate and runs the controlled correctness and timing path.
     def evaluate(self, source):
@@ -68,6 +71,7 @@ def _run(args):
         worker.write_text("workload.py", workload_source)
         extracted = worker.run("extract-fixture")
         source = extracted.pop("source")
+        source = _with_reference(workload_source, source)
         baseline_source = _slow_fixture(source, args.launches)
         print(
             json.dumps(
@@ -84,7 +88,9 @@ def _run(args):
             model=args.model,
             skills=tuple(skills),
         )
-        result = _run_agent(baseline_source, settings, evaluator)
+        track_id = hashlib.sha256(baseline_source.encode()).hexdigest()
+        workspace = settings.cache_dir / "tracks" / f"benchmark-{track_id}"
+        result = _run_agent(baseline_source, settings, evaluator, workspace)
 
     if result.model_calls < 2:
         raise RuntimeError("agent did not execute a multi-turn graph")
