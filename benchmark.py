@@ -62,9 +62,9 @@ def _run(args):
 
     workload_source = (ROOT / "workload.py").read_text(encoding="utf-8")
     skills = args.skill if args.skill is not None else _default_skills()
-    compute = _read_compute_config()
+    compute = _read_compute_config(args.chip)
 
-    with _ComputeSandbox(compute, args.chip) as worker:
+    with _ComputeSandbox(compute) as worker:
         worker.write_text("workload.py", workload_source)
         extracted = worker.run("extract-fixture")
         source = extracted.pop("source")
@@ -80,7 +80,6 @@ def _run(args):
         settings = replace(
             _read_settings(None, ""),
             benchmark_budget=args.benchmarks,
-            chip=evaluator.chip,
             min_improvement=0.05,
             model=args.model,
             skills=tuple(skills),

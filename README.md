@@ -81,10 +81,11 @@ that graph state and has no host shell access.
 The graph chooses its own optimization workflow. The host restricts only the
 expensive boundary: `TILESMITH_BENCHMARKS` is the number of unique candidate
 benchmarks, defaulting to four. Duplicate source reuses its prior result. The
-graph retains the five newest benchmark payloads. The tool rejects incorrect
-source before timing and reports the exact evaluator chip and source hash. The
-host selects the fastest successfully measured candidate regardless of the
-agent's final text and runs a fresh confirmation before installation.
+model context retains the five newest benchmark payloads without discarding
+other tool work. The tool rejects incorrect source before timing and reports
+the exact evaluator chip and source hash. The host selects the fastest
+successfully measured candidate regardless of the agent's final text and runs
+a fresh confirmation before installation.
 
 Correctness covers normal, zero, and high-magnitude inputs against the original
 TorchInductor callable. Timing uses 25 warmups, alternating baseline/candidate

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from langchain_core.language_models.fake_chat_models import (
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 import tilesmith
 
@@ -50,6 +50,57 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIn("budget exhausted", exhausted["error"])
         self.assertEqual(track.benchmarks, 1)
 
+    # test_history_keeps_five_benchmarks proves unrelated tools do not consume the retention budget.
+    def test_history_keeps_five_benchmarks(self):
+        messages = []
+        for attempt in range(6):
+            benchmark_id = f"benchmark-{attempt}"
+            read_id = f"read-{attempt}"
+            messages.extend(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "benchmark_candidate",
+                                "args": {"source": f"candidate-{attempt}"},
+                                "id": benchmark_id,
+                                "type": "tool_call",
+                            },
+                            {
+                                "name": "read_file",
+                                "args": {"path": "/kernel.py"},
+                                "id": read_id,
+                                "type": "tool_call",
+                            },
+                        ],
+                    ),
+                    ToolMessage(
+                        content=f"report-{attempt}",
+                        name="benchmark_candidate",
+                        tool_call_id=benchmark_id,
+                    ),
+                    ToolMessage(
+                        content="kernel source",
+                        name="read_file",
+                        tool_call_id=read_id,
+                    ),
+                ]
+            )
+
+        tilesmith._BenchmarkHistoryEdit().apply(messages, count_tokens=lambda _: 0)
+
+        benchmark_results = messages[1::3]
+        read_results = messages[2::3]
+        self.assertEqual(
+            [message.content for message in benchmark_results],
+            ["[cleared]", *[f"report-{attempt}" for attempt in range(1, 6)]],
+        )
+        self.assertEqual(messages[0].tool_calls[0]["args"], {})
+        self.assertTrue(
+            all(message.content == "kernel source" for message in read_results)
+        )
+
     # test_real_graph_installs_measured_source proves Deep Agents executes the benchmark tool loop.
     def test_real_graph_installs_measured_source(self):
         optimized = 'def call(args):\n    return "optimized"\n'
@@ -72,7 +123,6 @@ class TilesmithAgentTests(unittest.TestCase):
         settings = tilesmith._Settings(
             benchmark_budget=2,
             cache_dir=Path("/tmp"),
-            chip="",
             compute=None,
             min_improvement=0.01,
             model="test",
