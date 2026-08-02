@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import http.server
 import inspect
+import io
 import json
 import os
 import secrets
@@ -32,16 +33,26 @@ OPTIMIZE_LOCK = threading.Lock()
 class _Settings:
     agent_root: Path
     cache_dir: Path
+    chip: str
     config: str
     iterations: int
     min_improvement: float
+    modal_profile: str
     model: str
+    sandbox: str
     skills: tuple[str, ...]
     timeout: str
 
 
 # compile returns a normal torch.compile callable while routing Inductor graphs through Tilesmith.
-def compile(model, *, example_inputs):
+def compile(model, *, example_inputs, sandbox=None, chip=None):
+    if sandbox not in (None, "modal"):
+        raise ValueError("sandbox must be None or 'modal'")
+    if sandbox is None and chip is not None:
+        raise ValueError("chip is only valid when sandbox is set")
+    if sandbox == "modal" and chip not in ("H100", "H100!"):
+        raise ValueError("sandbox='modal' currently requires chip='H100'")
+
     import torch
     from torch._inductor.compile_fx import compile_fx
 
@@ -50,21 +61,30 @@ def compile(model, *, example_inputs):
     if not isinstance(example_inputs, tuple):
         raise TypeError("example_inputs must be a tuple of positional model arguments")
     leaves = torch.utils._pytree.tree_leaves(example_inputs)
-    if not any(
-        torch.is_tensor(value) and value.device.type == "cuda" for value in leaves
-    ):
+    cuda_inputs = [
+        value
+        for value in leaves
+        if torch.is_tensor(value) and value.device.type == "cuda"
+    ]
+    if not cuda_inputs:
         raise ValueError("example_inputs must contain at least one CUDA tensor")
+    if sandbox == "modal":
+        device = cuda_inputs[0].device
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        capability = torch.cuda.get_device_capability(index)
+        if "H100" not in torch.cuda.get_device_name(index) or capability != (9, 0):
+            raise ValueError("chip='H100' requires local H100 execution inputs")
     if "inner_compile" not in inspect.signature(compile_fx).parameters:
         raise RuntimeError(
             "this PyTorch version does not expose Inductor's inner_compile hook"
         )
 
-    settings = _read_settings()
+    settings = _read_settings(sandbox, "H100" if chip else "")
     return torch.compile(model, backend=_Backend(settings))
 
 
 # _read_settings keeps the public API small while making expensive agent choices explicit in the environment.
-def _read_settings():
+def _read_settings(sandbox, chip):
     iterations = int(os.environ.get("TILESMITH_ITERATIONS", "4"))
     min_improvement = float(os.environ.get("TILESMITH_MIN_IMPROVEMENT", "0.01"))
     if iterations < 0:
@@ -80,10 +100,13 @@ def _read_settings():
         cache_dir=Path(os.environ.get("TILESMITH_CACHE_DIR", cache_default))
         .expanduser()
         .resolve(),
+        chip=chip,
         config=os.environ.get("CLIPROXY_CONFIG", ""),
         iterations=iterations,
         min_improvement=min_improvement,
-        model=os.environ.get("TILESMITH_MODEL", "gpt-5.4"),
+        modal_profile=os.environ.get("MODAL_PROFILE", "tilesmith-h100"),
+        model=os.environ.get("TILESMITH_MODEL", "gpt-5.5"),
+        sandbox=sandbox or "local",
         skills=tuple(_default_skills()),
         timeout=os.environ.get("TILESMITH_TIMEOUT", "20m"),
     )
@@ -171,7 +194,7 @@ class _LazyKernel:
     # __init__ defers optimization until real runtime tensors are available for validation and timing.
     def __init__(self, baseline, source, constants, settings):
         self.baseline = baseline
-        self.source = source
+        self.source = _canonical_source(source)
         self.constants = constants
         self.settings = settings
         self.installed = None
@@ -197,6 +220,11 @@ class _LazyKernel:
         if not cuda_inputs:
             return self.baseline
         device = cuda_inputs[0].device
+        if self.settings.sandbox == "modal":
+            index = device.index if device.index is not None else torch.cuda.current_device()
+            capability = torch.cuda.get_device_capability(index)
+            if "H100" not in torch.cuda.get_device_name(index) or capability != (9, 0):
+                raise RuntimeError("the H100 sandbox track can execute only on a local H100")
         cache_key = _cache_key(self.source, self.settings, device)
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -204,14 +232,27 @@ class _LazyKernel:
             cached = _read_cache(self.settings.cache_dir, cache_key)
             if cached is None:
                 with OPTIMIZE_LOCK, _preserve_rng():
-                    evaluator = _Evaluator(
-                        self.baseline, self.constants, inputs, device
-                    )
+                    if self.settings.sandbox == "modal":
+                        evaluator = _ModalEvaluator(
+                            self.source, self.constants, inputs, self.settings
+                        )
+                    else:
+                        evaluator = _Evaluator(
+                            self.baseline, self.constants, inputs, device
+                        )
                     optimized = _run_agent(self.source, self.settings, evaluator)
                 cached = _write_cache(self.settings.cache_dir, cache_key, optimized)
         if cached.read_text(encoding="utf-8") == self.source:
             return self.baseline
         return _load_call(cached, self.constants)
+
+
+# _canonical_source removes PyTorch's incrementing, non-executable AOT ID comment.
+def _canonical_source(source):
+    first_line, separator, remainder = source.partition("\n")
+    if first_line.startswith("# AOT ID:"):
+        return remainder if separator else ""
+    return source
 
 
 # _cache_key binds an accepted source file to its graph, agent policy, software, and NVIDIA target.
@@ -229,6 +270,8 @@ def _cache_key(source, settings, device):
         "iterations": settings.iterations,
         "min_improvement": settings.min_improvement,
         "model": settings.model,
+        "sandbox": settings.sandbox,
+        "sandbox_chip": settings.chip,
         "torch": str(torch.__version__),
         "triton": str(triton.__version__),
         "warmup": WARMUP,
@@ -322,17 +365,41 @@ def _load_call(path, constants):
     return module.call
 
 
+# _cpu_copy makes Modal payloads device-independent while preserving tensor layouts.
+def _cpu_copy(value):
+    import torch
+
+    if torch.is_tensor(value):
+        return value.detach().cpu(memory_format=torch.preserve_format)
+    if isinstance(value, tuple):
+        return tuple(_cpu_copy(item) for item in value)
+    if isinstance(value, list):
+        return [_cpu_copy(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _cpu_copy(item) for key, item in value.items()}
+    return value
+
+
 class _Evaluator:
     # __init__ snapshots real inputs before either boxed callable can clear its argument list.
     def __init__(self, baseline, constants, inputs, device):
+        import torch
+
         self.baseline = baseline
         self.constants = constants
         self.device = device
         self.inputs = tuple(inputs)
         self.directory = tempfile.TemporaryDirectory(prefix="tilesmith-evaluator-")
         self.lock = threading.Lock()
+        index = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
+        capability = torch.cuda.get_device_capability(index)
+        self.chip = (
+            f"{torch.cuda.get_device_name(index)} (sm_{capability[0]}{capability[1]})"
+        )
 
-    # evaluate rejects incorrect source before reporting its median CUDA-event runtime in milliseconds.
+    # evaluate rejects incorrect source before returning an interleaved CUDA-event comparison.
     def evaluate(self, source):
         import torch
         from torch._inductor.codecache import code_hash
@@ -353,7 +420,10 @@ class _Evaluator:
                 actual = candidate(list(self._inputs(variant)))
                 torch.testing.assert_close(actual, expected, equal_nan=True)
             torch.cuda.synchronize(self.device)
-            return self._benchmark(candidate)
+            report = self._benchmark(candidate)
+            report["chip"] = self.chip
+            report["reference"] = "torch_inductor_generated"
+            return report
 
     # _inputs clones strides and optionally changes values without changing compiled shapes or dtypes.
     def _inputs(self, variant):
@@ -376,26 +446,79 @@ class _Evaluator:
             values.append(cloned)
         return tuple(values)
 
-    # _benchmark excludes compilation and warmup, then returns the median of independent CUDA-event samples.
+    # _benchmark alternates baseline/candidate order and returns paired samples plus their median ratio.
     def _benchmark(self, function):
         import torch
 
         inputs = self._inputs("normal")
+        functions = (("torch_inductor", self.baseline), ("candidate_triton", function))
         for _ in range(WARMUP):
-            function(list(inputs))
+            for _, measured in functions:
+                measured(list(inputs))
         torch.cuda.synchronize(self.device)
 
-        samples = []
-        for _ in range(BENCH_SAMPLES):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            for _ in range(BENCH_ITERATIONS):
-                function(list(inputs))
-            end.record()
-            end.synchronize()
-            samples.append(start.elapsed_time(end) / BENCH_ITERATIONS)
-        return statistics.median(samples)
+        samples = {name: [] for name, _ in functions}
+        for sample in range(BENCH_SAMPLES):
+            order = functions if sample % 2 == 0 else tuple(reversed(functions))
+            for name, measured in order:
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                for _ in range(BENCH_ITERATIONS):
+                    measured(list(inputs))
+                end.record()
+                end.synchronize()
+                samples[name].append(start.elapsed_time(end) / BENCH_ITERATIONS)
+
+        ratios = [
+            candidate / baseline
+            for baseline, candidate in zip(
+                samples["torch_inductor"], samples["candidate_triton"]
+            )
+        ]
+        return {
+            "benchmark_iterations": BENCH_ITERATIONS,
+            "benchmark_samples": BENCH_SAMPLES,
+            "candidate_ms": statistics.median(samples["candidate_triton"]),
+            "candidate_samples_ms": samples["candidate_triton"],
+            "score": statistics.median(ratios),
+            "torch_inductor_ms": statistics.median(samples["torch_inductor"]),
+            "torch_inductor_samples_ms": samples["torch_inductor"],
+            "warmup": WARMUP,
+        }
+
+
+class _ModalEvaluator:
+    # __init__ snapshots source, constants, and runtime inputs for remote H100 evaluation.
+    def __init__(self, baseline_source, constants, inputs, settings):
+        import torch
+
+        self.baseline_source = baseline_source
+        self.chip = settings.chip
+        self.profile = settings.modal_profile
+        payload = {
+            "constants": _cpu_copy(constants),
+            "inputs": _cpu_copy(tuple(inputs)),
+        }
+        buffer = io.BytesIO()
+        torch.save(payload, buffer)
+        self.payload = buffer.getvalue()
+
+    # evaluate invokes only the deployed benchmark function while the agent remains local.
+    def evaluate(self, source):
+        os.environ["MODAL_PROFILE"] = self.profile
+        try:
+            import modal
+        except ImportError as error:
+            raise RuntimeError("modal is required for sandbox='modal'") from error
+
+        function = modal.Function.from_name("tilesmith", "compare_generated")
+        return function.remote(
+            self.baseline_source,
+            source,
+            self.payload,
+            self.chip,
+        )
 
 
 # _evaluator_server exposes the in-process CUDA evaluator only to a token-authenticated localhost command.
@@ -404,7 +527,7 @@ def _evaluator_server(evaluator):
     token = secrets.token_urlsafe(32)
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        # do_POST evaluates raw candidate source and returns one lower-is-better score.
+        # do_POST evaluates raw source and returns structured evidence followed by its score.
         def do_POST(self):
             if self.headers.get("Authorization") != f"Bearer {token}":
                 self.send_error(403)
@@ -414,8 +537,9 @@ def _evaluator_server(evaluator):
                 self.send_error(413)
                 return
             try:
-                score = evaluator.evaluate(self.rfile.read(length).decode())
-                response = f"{score:.9g}\n".encode()
+                result = evaluator.evaluate(self.rfile.read(length).decode())
+                report = json.dumps(result, sort_keys=True)
+                response = f"{report}\n{result['score']:.9g}\n".encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(response)))
                 self.end_headers()
@@ -466,6 +590,8 @@ def _run_agent(source, settings, evaluator):
                 str(kernel_path),
                 "-evaluate",
                 evaluate,
+                "-chip",
+                evaluator.chip,
                 "-iterations",
                 str(settings.iterations),
                 "-min-improvement",

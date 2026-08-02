@@ -78,7 +78,7 @@ def _evaluate(args):
     kernel_source = Path(kernel_path).read_text(encoding="utf-8")
     result = _remote(args.profile, "evaluate", workload_source, kernel_source)
     print(json.dumps(result, sort_keys=True))
-    print(f"{result['milliseconds']:.9g}")
+    print(f"{result['score']:.9g}")
 
 
 # _run deploys one evaluator, creates the controlled baseline, and drives every agent attempt.
@@ -127,6 +127,8 @@ def _run(args):
             args.config,
             "-model",
             args.model,
+            "-chip",
+            "NVIDIA H100 (sm_90)",
             "-iterations",
             str(args.attempts),
             "-min-improvement",
@@ -174,8 +176,8 @@ def _run(args):
         print(
             json.dumps(
                 {
-                    "baseline_ms": float(installed.group(2)),
-                    "confirmed_ms": float(installed.group(3)),
+                    "baseline_score": float(installed.group(2)),
+                    "confirmed_score": float(installed.group(3)),
                     "improvement": gain,
                     "model_attempts": len(attempts),
                     "skill_files": len(skills),
@@ -196,7 +198,7 @@ def _parse_args():
     run_parser.add_argument("--config", default=os.environ.get("CLIPROXY_CONFIG", ""))
     run_parser.add_argument("--expected-improvement", type=float, default=0.25)
     run_parser.add_argument("--launches", type=int, default=4)
-    run_parser.add_argument("--model", default=os.environ.get("TILESMITH_MODEL", "gpt-5.4"))
+    run_parser.add_argument("--model", default=os.environ.get("TILESMITH_MODEL", "gpt-5.5"))
     run_parser.add_argument("--profile", default=os.environ.get("MODAL_PROFILE", "tilesmith-h100"))
     run_parser.add_argument("--skill", action="append", help="trusted skill or reference file; repeatable")
     run_parser.add_argument("--workload", default=str(ROOT / "workload.py"))
