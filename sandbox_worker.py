@@ -1,8 +1,10 @@
 """Run Tilesmith correctness checks and CUDA benchmarks inside a sandbox."""
 
 import importlib.util
+import gzip
 import json
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -75,8 +77,115 @@ def _metadata(torch, triton):
         "cuda": str(torch.version.cuda),
         "driver": driver,
         "gpu": torch.cuda.get_device_name(),
+        "ncu": shutil.which("ncu"),
+        "nvidia_smi_q_xml": subprocess.check_output(
+            ["nvidia-smi", "-q", "-x"],
+            text=True,
+        ),
         "torch": str(torch.__version__),
         "triton": str(triton.__version__),
+    }
+
+
+# _profile_exports returns the complete Kineto trace plus readable aggregate and memory views.
+def _profile_exports(profiler, prefix):
+    trace_path = ROOT / f"{prefix}-trace.json"
+    memory_path = ROOT / f"{prefix}-memory.raw.json.gz"
+    cpu_stacks_path = ROOT / f"{prefix}-cpu-stacks.txt"
+    device_stacks_path = ROOT / f"{prefix}-device-stacks.txt"
+    profiler.export_chrome_trace(str(trace_path))
+
+    try:
+        averages = profiler.key_averages(
+            group_by_input_shape=True,
+            group_by_stack_n=8,
+            group_by_overload_name=True,
+        )
+    except TypeError:
+        # Older supported PyTorch builds do not expose overload grouping.
+        averages = profiler.key_averages(
+            group_by_input_shape=True,
+            group_by_stack_n=8,
+        )
+    tables = {
+        "self_cpu_time_total": averages.table(
+            sort_by="self_cpu_time_total",
+            row_limit=-1,
+        )
+    }
+    for metric in ("self_device_time_total", "self_cuda_time_total"):
+        try:
+            tables[metric] = averages.table(sort_by=metric, row_limit=-1)
+            break
+        except (AttributeError, KeyError, RuntimeError):
+            continue
+
+    exports = {
+        "chrome_trace": json.loads(trace_path.read_text(encoding="utf-8")),
+        "events": len(profiler.events()),
+        "key_averages": tables,
+    }
+    try:
+        profiler.export_memory_timeline(str(memory_path))
+        with gzip.open(memory_path, "rt", encoding="utf-8") as memory_file:
+            exports["memory_timeline"] = json.load(memory_file)
+    except Exception as error:
+        exports["memory_timeline_error"] = str(error)
+
+    for name, path, metric in (
+        ("cpu_stacks", cpu_stacks_path, "self_cpu_time_total"),
+        ("device_stacks", device_stacks_path, "self_cuda_time_total"),
+    ):
+        try:
+            profiler.export_stacks(str(path), metric)
+            exports[name] = path.read_text(encoding="utf-8")
+        except Exception as error:
+            exports[f"{name}_error"] = str(error)
+    return exports
+
+
+# _profile_cuda captures every PyTorch/Kineto trace and allocator view available in-process.
+def _profile_cuda(torch, function, inputs, prefix):
+    activities = [
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ]
+    torch.cuda.reset_peak_memory_stats()
+    memory_before = dict(torch.cuda.memory_stats())
+    with torch.profiler.profile(
+        activities=activities,
+        profile_memory=True,
+        record_shapes=True,
+        with_flops=True,
+        with_modules=True,
+        with_stack=True,
+    ) as profiler:
+        with torch.profiler.record_function("tilesmith_candidate"):
+            function(list(inputs))
+        torch.cuda.synchronize()
+
+    try:
+        memory_snapshot = torch.cuda.memory_snapshot()
+    except Exception as error:
+        memory_snapshot = {"error": str(error)}
+
+    return {
+        "activities": ["CPU", "CUDA"],
+        "allocator": {
+            "memory_snapshot": memory_snapshot,
+            "stats_after": dict(torch.cuda.memory_stats()),
+            "stats_before": memory_before,
+        },
+        "config": {
+            "profile_memory": True,
+            "record_shapes": True,
+            "with_flops": True,
+            "with_modules": True,
+            "with_stack": True,
+        },
+        "kineto": _profile_exports(profiler, prefix),
+        "peak_memory_allocated": torch.cuda.max_memory_allocated(),
+        "peak_memory_reserved": torch.cuda.max_memory_reserved(),
     }
 
 
@@ -324,6 +433,17 @@ def _compare(torch, triton):
             int(request["samples"]),
         )
     )
+    metadata["profiling"] = _profile_cuda(
+        torch,
+        measured,
+        inputs,
+        "generated-candidate",
+    )
+    metadata["profiling_progress"] = [
+        "correctness_complete",
+        "timing_complete",
+        "torch_profile_complete",
+    ]
     metadata["reference"] = "torch_inductor_generated"
     return metadata
 
@@ -348,8 +468,47 @@ def _evaluate_fixture(torch, triton):
     workload = _load_module("tilesmith_workload", ROOT / "workload.py")
     candidate = _load_module("tilesmith_candidate", ROOT / "candidate.py")
     metadata["cases"] = _check(torch, workload, candidate)
+    inputs = workload.make_inputs("cuda")
+
+    # measured adapts the generated fixture's boxed convention for profiling.
+    def measured(values):
+        return candidate.call(list(values))
+
     metadata.update(_benchmark_fixture(torch, workload, candidate, request))
+    metadata["profiling"] = _profile_cuda(
+        torch,
+        measured,
+        inputs,
+        "fixture-candidate",
+    )
+    metadata["profiling_progress"] = [
+        "correctness_complete",
+        "timing_complete",
+        "torch_profile_complete",
+    ]
     return metadata
+
+
+# _profile_generated runs one warmed generated candidate for an external Nsight Compute launch.
+def _profile_generated(torch, triton):
+    serialized = torch.load(ROOT / "payload.pt", map_location="cpu", weights_only=False)
+    constants = _to_cuda(torch, serialized["constants"])
+    inputs = _to_cuda(torch, serialized["inputs"])
+    candidate = _load_generated(torch, ROOT / "candidate.py", constants)
+    with torch.no_grad():
+        candidate(list(inputs))
+    torch.cuda.synchronize()
+    return {"profiled": True}
+
+
+# _profile_fixture runs one warmed fixture candidate for an external Nsight Compute launch.
+def _profile_fixture(torch, triton):
+    workload = _load_module("tilesmith_workload", ROOT / "workload.py")
+    candidate = _load_module("tilesmith_candidate", ROOT / "candidate.py")
+    with torch.no_grad():
+        candidate.call(list(workload.make_inputs("cuda")))
+    torch.cuda.synchronize()
+    return {"profiled": True}
 
 
 # main dispatches the single requested worker action and emits one JSON report.
@@ -362,6 +521,8 @@ def main():
         "compare": _compare,
         "extract-fixture": _extract_fixture,
         "evaluate-fixture": _evaluate_fixture,
+        "profile-generated": _profile_generated,
+        "profile-fixture": _profile_fixture,
     }
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} {'|'.join(actions)}")

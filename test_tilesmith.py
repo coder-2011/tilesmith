@@ -36,28 +36,39 @@ class _Evaluator:
 
     # evaluate makes numbered and explicitly optimized candidates progressively faster.
     def evaluate(self, source):
+        if "optimized-2" in source:
+            return {"profiling": {"events": ["kernel-2"]}, "score": 0.4}
         if "optimized" in source:
-            return {"score": 0.5}
+            return {"profiling": {"events": ["kernel-1"]}, "score": 0.5}
         if source.startswith("candidate-"):
             return {"score": 1 - int(source.split("-")[1]) / 100}
-        return {"score": 1.0}
+        return {"profiling": {"events": ["baseline"]}, "score": 1.0}
 
 
 class TilesmithAgentTests(unittest.TestCase):
     """Cover the graph boundary and the host-owned benchmark invariants."""
 
-    # test_track_reuses_results_and_enforces_budget checks the costly stateful edge cases together.
-    def test_track_reuses_results_and_enforces_budget(self):
+    # test_track_enforces_one_new_benchmark_per_loop checks the costly stateful edge cases together.
+    def test_track_enforces_one_new_benchmark_per_loop(self):
         evaluator = _Evaluator()
-        track = tilesmith._BenchmarkTrack("baseline\n", {"score": 1.0}, evaluator, 1)
+        track = tilesmith._BenchmarkTrack("baseline\n", {"score": 1.0}, evaluator, 2)
 
+        track.start_loop(0)
+        baseline = json.loads(track.benchmark("baseline"))
         measured = json.loads(track.benchmark("candidate-7"))
+        blocked = json.loads(track.benchmark("candidate-8"))
+        track.start_loop(1)
         cached = json.loads(track.benchmark("candidate-7"))
-        exhausted = json.loads(track.benchmark("candidate-8"))
+        second = json.loads(track.benchmark("candidate-8"))
+
+        self.assertTrue(baseline["cached"])
+        self.assertEqual(baseline["progress"]["status"], "needs_new_candidate")
         self.assertAlmostEqual(measured["score"], 0.93)
+        self.assertIn("already benchmarked", blocked["error"])
         self.assertTrue(cached["cached"])
-        self.assertIn("budget exhausted", exhausted["error"])
-        self.assertEqual(track.benchmarks, 1)
+        self.assertAlmostEqual(second["score"], 0.92)
+        self.assertEqual(second["progress"]["percent"], 100)
+        self.assertEqual(track.benchmarks, 2)
 
     # test_history_keeps_five_benchmarks proves unrelated tools do not consume the retention budget.
     def test_history_keeps_five_benchmarks(self):
@@ -142,12 +153,14 @@ class TilesmithAgentTests(unittest.TestCase):
                 )
             )
 
-    # test_real_graph_installs_measured_file proves Deep Agents editing, search, shell, and benchmark wiring.
+    # test_real_graph_installs_measured_file proves LangGraph retries an unbenchmarked loop.
     def test_real_graph_installs_measured_source(self):
         _ToolModel.seen_tools.clear()
         optimized = 'def call(args):\n    return "optimized"\n'
+        optimized_2 = 'def call(args):\n    return "optimized-2"\n'
         model = _ToolModel(
             responses=[
+                AIMessage(content="still planning"),
                 AIMessage(
                     content="",
                     tool_calls=[
@@ -187,12 +200,38 @@ class TilesmithAgentTests(unittest.TestCase):
                     ],
                 ),
                 AIMessage(content="done"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {
+                                "file_path": "/attempts/attempt_02.py",
+                                "content": optimized_2,
+                            },
+                            "id": "write-2",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "benchmark_candidate",
+                            "args": {"path": "/attempts/attempt_02.py"},
+                            "id": "benchmark-2",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="done"),
             ]
         )
         settings = tilesmith._Settings(
-            benchmark_budget=2,
             cache_dir=Path("/tmp"),
             compute=None,
+            loops=2,
             min_improvement=0.01,
             model="test",
             skills=(),
@@ -212,12 +251,17 @@ class TilesmithAgentTests(unittest.TestCase):
                     Path(directory) / "track",
                 )
             attempts = sorted((Path(directory) / "track" / "attempts").glob("*.py"))
+            reports = sorted((Path(directory) / "track" / "profiles").glob("*.json"))
 
-        self.assertIn(optimized, result.source)
-        self.assertEqual(result.benchmarks, 1)
-        self.assertEqual(result.model_calls, 4)
-        self.assertEqual(result.confirmed_score, 0.5)
+        self.assertIn(optimized_2, result.source)
+        self.assertEqual(result.benchmarks, 2)
+        self.assertEqual(result.model_calls, 8)
+        self.assertEqual(result.confirmed_score, 0.4)
         self.assertEqual(len(attempts), 5)
+        self.assertEqual(
+            [path.name for path in reports],
+            ["baseline.json", "loop_00.json", "loop_01.json"],
+        )
         self.assertTrue(
             {"execute", "web_search", "write_file"} <= _ToolModel.seen_tools
         )

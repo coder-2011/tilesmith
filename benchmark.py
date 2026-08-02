@@ -47,15 +47,16 @@ class _FixtureEvaluator:
     # evaluate uploads one candidate and runs the controlled correctness and timing path.
     def evaluate(self, source):
         self.worker.write_text("candidate.py", source)
-        return self.worker.run("evaluate-fixture")
+        report = self.worker.run("evaluate-fixture")
+        report["profiling"]["nsight_compute"] = self.worker.profile(
+            "profile-fixture"
+        )
+        report["profiling_progress"].append("nsight_compute_complete")
+        return report
 
 
 # _run creates one ComputeSDK evaluator, builds the controlled baseline, and drives the graph.
 def _run(args):
-    if args.benchmarks < 2:
-        raise ValueError(
-            "--benchmarks must be at least 2 so this exercises an agent loop"
-        )
     if args.launches < 2:
         raise ValueError("--launches must be at least 2")
     if args.expected_improvement < 0 or args.expected_improvement >= 1:
@@ -82,8 +83,7 @@ def _run(args):
 
         evaluator = _FixtureEvaluator(worker)
         settings = replace(
-            _read_settings(None, ""),
-            benchmark_budget=args.benchmarks,
+            _read_settings(None, "", args.loops),
             min_improvement=0.05,
             model=args.model,
             skills=tuple(skills),
@@ -96,6 +96,10 @@ def _run(args):
         raise RuntimeError("agent did not execute a multi-turn graph")
     if result.benchmarks < 1:
         raise RuntimeError("agent did not use benchmark_candidate")
+    if result.benchmarks != args.loops:
+        raise RuntimeError(
+            f"graph completed {result.benchmarks} benchmarks for {args.loops} loops"
+        )
     if result.source == baseline_source:
         raise RuntimeError("agent did not catch the controlled optimization")
 
@@ -112,6 +116,7 @@ def _run(args):
                 "benchmarks": result.benchmarks,
                 "confirmed_score": result.confirmed_score,
                 "improvement": gain,
+                "loops": args.loops,
                 "model_calls": result.model_calls,
                 "skill_files": len(skills),
             },
@@ -130,7 +135,7 @@ def _parse_args():
     run_parser = commands.add_parser(
         "run", help="run the complete Deep Agents benchmark"
     )
-    run_parser.add_argument("--benchmarks", type=int, default=4)
+    run_parser.add_argument("--loops", type=int, default=1)
     run_parser.add_argument("--chip", default="H100")
     run_parser.add_argument("--expected-improvement", type=float, default=0.25)
     run_parser.add_argument("--launches", type=int, default=4)

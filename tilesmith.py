@@ -2,6 +2,7 @@ import builtins
 import base64
 import contextlib
 import fcntl
+import gzip
 import hashlib
 import importlib.metadata
 import inspect
@@ -10,13 +11,16 @@ import json
 import math
 import os
 import shlex
+import shutil
 import statistics
+import subprocess
 import sys
 import tempfile
 import threading
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypedDict
 
 
 ROOT = Path(__file__).resolve().parent
@@ -27,6 +31,7 @@ MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_SKILL_BYTES = 8 * 1024 * 1024
 ATTEMPT_FILES = 5
 BENCHMARK_HISTORY = ATTEMPT_FILES
+MAX_AGENT_STEPS = 70
 OPTIMIZE_LOCK = threading.Lock()
 REMOTE_ROOT = "/tmp/tilesmith"
 REMOTE_COMMAND_TIMEOUT_MS = 20 * 60 * 1000
@@ -38,12 +43,12 @@ AGENT_PROMPT = """You optimize generated TorchInductor Triton Python.
 Preserve the generated wrapper's call(args) ABI, output layouts, strides, dtypes, aliasing, and exact semantics.
 Your persistent per-graph workspace is /attempts and contains exactly five rolling Python files named attempt_00.py through attempt_04.py.
 Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize or execute that reference block; preserve it so you can relate generated kernels to PyTorch operations.
-The user message identifies the next attempt file. It is already copied from the most recently benchmarked source. Edit that file instead of starting over. After attempt_04.py, the host discards the oldest contents, shifts the other attempts down, and reuses attempt_04.py.
+The user message identifies the current optimization loop and its next attempt file. The file is already copied from the most recently benchmarked source. Edit it instead of starting over. After attempt_04.py, the host discards the oldest contents, shifts the other attempts down, and reuses attempt_04.py.
 Use the graph's planning, file editing, bash, subagent, and web-search capabilities whenever useful; choose your own workflow.
 For file tools use /attempts/attempt_XX.py. Bash starts at the workspace root, so use attempts/attempt_XX.py there. Work only inside this workspace and do not create other Python files.
 Use bash only to inspect, diff, and edit source. Do not run generated code, CUDA, timing, package installation, network clients, or benchmark commands through bash.
 Use web search to resolve concrete Triton, PyTorch, or NVIDIA uncertainties, preferring primary documentation and source.
-Call benchmark_candidate(path) with the attempt file for every complete candidate you want checked. This tool is the only authority for compilation, correctness, GPU warmup, and timing; never invent results.
+Each graph loop ends only after one new candidate calls benchmark_candidate(path). The tool is the only authority for compilation, correctness, GPU warmup, profiling, and timing; never invent results. Read its complete profiling packet and progress before the next loop.
 Improve its lower-is-better score. Inspect both Triton kernels and the Python launch graph, and make coherent changes rather than broad rewrites.
 Do not detect or bypass the benchmark, weaken correctness, call the reference implementation, or replace a custom kernel with a library implementation.
 The host installs the fastest successfully benchmarked source after a fresh confirmation, so your final response may briefly summarize the work instead of repeating the source.
@@ -65,9 +70,9 @@ class _ComputeConfig:
 
 @dataclass(frozen=True)
 class _Settings:
-    benchmark_budget: int
     cache_dir: Path
     compute: _ComputeConfig | None
+    loops: int
     min_improvement: float
     model: str
     skills: tuple[str, ...]
@@ -85,15 +90,23 @@ class _AgentResult:
     model_calls: int
 
 
+class _LoopState(TypedDict):
+    """Carry deterministic loop progress around the outer LangGraph."""
+
+    completed: int
+    messages: list
+    path: str
+
+
 # compile returns a normal torch.compile callable while routing Inductor graphs through Tilesmith.
-def compile(model, *, example_inputs, sandbox=None, chip=None):
+def compile(model, *, example_inputs, loops=1, sandbox=None, chip=None):
     if sandbox not in (None, "computesdk"):
         raise ValueError("sandbox must be None or 'computesdk'")
     if sandbox is None and chip is not None:
         raise ValueError("chip is only valid when sandbox is set")
     if sandbox == "computesdk" and (not isinstance(chip, str) or not chip.strip()):
         raise ValueError("sandbox='computesdk' requires a non-empty chip")
-    settings = _read_settings(sandbox, chip or "")
+    settings = _read_settings(sandbox, chip or "", loops)
 
     import torch
     from torch._inductor.compile_fx import compile_fx
@@ -129,12 +142,11 @@ def compile(model, *, example_inputs, sandbox=None, chip=None):
 
 
 # _read_settings keeps the public API small while making expensive agent choices explicit in the environment.
-def _read_settings(sandbox, chip):
-    benchmark_budget = int(os.environ.get("TILESMITH_BENCHMARKS", "4"))
+def _read_settings(sandbox, chip, loops=1):
     min_improvement = float(os.environ.get("TILESMITH_MIN_IMPROVEMENT", "0.01"))
     timeout = float(os.environ.get("TILESMITH_TIMEOUT", "1200"))
-    if benchmark_budget < 0:
-        raise ValueError("TILESMITH_BENCHMARKS must be non-negative")
+    if isinstance(loops, bool) or not isinstance(loops, int) or not 1 <= loops < MAX_AGENT_STEPS:
+        raise ValueError(f"loops must be an integer from 1 through {MAX_AGENT_STEPS - 1}")
     if min_improvement < 0 or min_improvement >= 1:
         raise ValueError("TILESMITH_MIN_IMPROVEMENT must be in [0, 1)")
     if timeout <= 0:
@@ -142,11 +154,11 @@ def _read_settings(sandbox, chip):
 
     cache_default = Path.home() / ".cache" / "tilesmith"
     return _Settings(
-        benchmark_budget=benchmark_budget,
         cache_dir=Path(os.environ.get("TILESMITH_CACHE_DIR", cache_default))
         .expanduser()
         .resolve(),
         compute=_read_compute_config(chip) if sandbox == "computesdk" else None,
+        loops=loops,
         min_improvement=min_improvement,
         model=os.environ.get("TILESMITH_MODEL", "gpt-5.5"),
         skills=tuple(_default_skills()),
@@ -441,8 +453,8 @@ def _cache_key(source, settings, device):
         "cuda": str(torch.version.cuda),
         "deepagents": _package_version("deepagents"),
         "device": torch.cuda.get_device_name(index),
-        "benchmark_budget": settings.benchmark_budget,
         "langchain_openai": _package_version("langchain-openai"),
+        "loops": settings.loops,
         "min_improvement": settings.min_improvement,
         "model": settings.model,
         "compute": (
@@ -563,6 +575,123 @@ def _cpu_copy(value):
     return value
 
 
+# _profile_exports returns the complete Kineto trace plus readable aggregate and memory views.
+def _profile_exports(profiler, directory, prefix):
+    directory = Path(directory)
+    trace_path = directory / f"{prefix}-trace.json"
+    memory_path = directory / f"{prefix}-memory.raw.json.gz"
+    cpu_stacks_path = directory / f"{prefix}-cpu-stacks.txt"
+    device_stacks_path = directory / f"{prefix}-device-stacks.txt"
+    profiler.export_chrome_trace(str(trace_path))
+
+    try:
+        averages = profiler.key_averages(
+            group_by_input_shape=True,
+            group_by_stack_n=8,
+            group_by_overload_name=True,
+        )
+    except TypeError:
+        # Older supported PyTorch builds do not expose overload grouping.
+        averages = profiler.key_averages(
+            group_by_input_shape=True,
+            group_by_stack_n=8,
+        )
+    tables = {
+        "self_cpu_time_total": averages.table(
+            sort_by="self_cpu_time_total",
+            row_limit=-1,
+        )
+    }
+    for metric in ("self_device_time_total", "self_cuda_time_total"):
+        try:
+            tables[metric] = averages.table(sort_by=metric, row_limit=-1)
+            break
+        except (AttributeError, KeyError, RuntimeError):
+            continue
+
+    exports = {
+        "chrome_trace": json.loads(trace_path.read_text(encoding="utf-8")),
+        "events": len(profiler.events()),
+        "key_averages": tables,
+    }
+    try:
+        profiler.export_memory_timeline(str(memory_path))
+        with gzip.open(memory_path, "rt", encoding="utf-8") as memory_file:
+            exports["memory_timeline"] = json.load(memory_file)
+    except Exception as error:
+        exports["memory_timeline_error"] = _summarize(error)
+
+    for name, path, metric in (
+        ("cpu_stacks", cpu_stacks_path, "self_cpu_time_total"),
+        ("device_stacks", device_stacks_path, "self_cuda_time_total"),
+    ):
+        try:
+            profiler.export_stacks(str(path), metric)
+            exports[name] = path.read_text(encoding="utf-8")
+        except Exception as error:
+            exports[f"{name}_error"] = _summarize(error)
+    return exports
+
+
+# _profile_cuda captures every PyTorch/Kineto trace and allocator view available in-process.
+def _profile_cuda(torch, function, inputs, directory, prefix):
+    activities = [
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ]
+    torch.cuda.reset_peak_memory_stats()
+    memory_before = dict(torch.cuda.memory_stats())
+    with torch.profiler.profile(
+        activities=activities,
+        profile_memory=True,
+        record_shapes=True,
+        with_flops=True,
+        with_modules=True,
+        with_stack=True,
+    ) as profiler:
+        with torch.profiler.record_function("tilesmith_candidate"):
+            function(list(inputs))
+        torch.cuda.synchronize()
+
+    try:
+        memory_snapshot = torch.cuda.memory_snapshot()
+    except Exception as error:
+        memory_snapshot = {"error": _summarize(error)}
+
+    profiling = {
+        "activities": ["CPU", "CUDA"],
+        "allocator": {
+            "memory_snapshot": memory_snapshot,
+            "stats_after": dict(torch.cuda.memory_stats()),
+            "stats_before": memory_before,
+        },
+        "config": {
+            "profile_memory": True,
+            "record_shapes": True,
+            "with_flops": True,
+            "with_modules": True,
+            "with_stack": True,
+        },
+        "kineto": _profile_exports(profiler, directory, prefix),
+        "nsight_compute": {
+            "available": shutil.which("ncu") is not None,
+            "collected": False,
+            "reason": "Nsight Compute must launch the process; use a ComputeSDK sandbox for full counters.",
+        },
+        "peak_memory_allocated": torch.cuda.max_memory_allocated(),
+        "peak_memory_reserved": torch.cuda.max_memory_reserved(),
+    }
+    if shutil.which("nvidia-smi") is not None:
+        try:
+            profiling["nvidia_smi_q_xml"] = subprocess.check_output(
+                ["nvidia-smi", "-q", "-x"],
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            profiling["nvidia_smi_error"] = _summarize(error)
+    return profiling
+
+
 class _Evaluator:
     # __init__ snapshots real inputs before either boxed callable can clear its argument list.
     def __init__(self, baseline, constants, inputs, device):
@@ -611,6 +740,18 @@ class _Evaluator:
             torch.cuda.synchronize(self.device)
             report = self._benchmark(candidate)
             report["chip"] = self.chip
+            report["profiling"] = _profile_cuda(
+                torch,
+                candidate,
+                self._inputs("normal"),
+                self.directory.name,
+                code_hash(source),
+            )
+            report["profiling_progress"] = [
+                "correctness_complete",
+                "timing_complete",
+                "torch_profile_complete",
+            ]
             report["reference"] = "torch_inductor_generated"
             return report
 
@@ -781,6 +922,48 @@ class _ComputeSandbox:
                 return report
         raise RuntimeError(f"remote {action} returned no JSON report")
 
+    # profile returns every raw Nsight Compute metric when ncu is installed and permitted.
+    def profile(self, action):
+        available = self.sandbox.run(
+            "command -v ncu",
+            timeout_ms=60_000,
+        )
+        if available.exit_code != 0:
+            return {
+                "available": False,
+                "collected": False,
+                "reason": "ncu is not installed in the ComputeSDK template",
+            }
+
+        command = shlex.join(
+            [
+                "ncu",
+                "--set",
+                "full",
+                "--page",
+                "raw",
+                "--csv",
+                "--target-processes",
+                "all",
+                "python3",
+                f"{REMOTE_ROOT}/worker.py",
+                action,
+            ]
+        )
+        result = self.sandbox.run(
+            command,
+            env={"PYTHONDONTWRITEBYTECODE": "1"},
+            timeout_ms=self.command_timeout_ms,
+        )
+        return {
+            "available": True,
+            "collected": result.exit_code == 0,
+            "command": command,
+            "exit_code": result.exit_code,
+            "stderr": result.stderr,
+            "stdout": result.stdout,
+        }
+
 
 # _require_remote_success preserves bounded worker diagnostics without exposing credentials.
 def _require_remote_success(result, operation):
@@ -834,7 +1017,12 @@ class _ComputeEvaluator:
     # evaluate uploads only the changing candidate and invokes the trusted worker.
     def evaluate(self, source):
         self.worker.write_text("candidate.py", source)
-        return self.worker.run("compare")
+        report = self.worker.run("compare")
+        report["profiling"]["nsight_compute"] = self.worker.profile(
+            "profile-generated"
+        )
+        report["profiling_progress"].append("nsight_compute_complete")
+        return report
 
 
 # _report_score validates the common evaluator contract before any result influences selection.
@@ -946,6 +1134,17 @@ class _AttemptWorkspace:
                 path.write_text(annotated, encoding="utf-8")
                 os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
 
+    # write_report persists the complete benchmark and profiler packet outside model history.
+    def write_report(self, name, report):
+        profiles = self.directory / "profiles"
+        profiles.mkdir(parents=True, exist_ok=True)
+        path = profiles / f"{name}.json"
+        path.write_text(
+            json.dumps(report, default=str, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return f"/profiles/{path.name}"
+
     # _annotate replaces any model-edited reference block with the trusted original.
     def _annotate(self, source):
         _, body = _split_reference(source)
@@ -957,17 +1156,19 @@ class _AttemptWorkspace:
 
 
 class _BenchmarkTrack:
-    """Own measured candidates, the benchmark budget, and fastest valid source."""
+    """Own graph-enforced benchmark loops and the fastest valid source."""
 
     # __init__ pins the trusted baseline and seeds duplicate detection with its exact source.
-    def __init__(self, source, baseline_report, evaluator, budget):
+    def __init__(self, source, baseline_report, evaluator, loops):
         baseline_score = _report_score(baseline_report, "baseline")
         source_hash = hashlib.sha256(source.encode()).hexdigest()
         self.baseline_score = baseline_score
         self.best_score = baseline_score
         self.best_source = source
-        self.budget = budget
         self.evaluator = evaluator
+        self.loop = -1
+        self.loop_complete = False
+        self.loops = loops
         self.benchmarks = 0
         self.lock = threading.Lock()
         self.evaluated = {
@@ -977,6 +1178,23 @@ class _BenchmarkTrack:
                 "score": baseline_score,
                 "source_sha256": source_hash,
             }
+        }
+
+    # start_loop permits one new candidate measurement for the selected graph loop.
+    def start_loop(self, loop):
+        self.loop = loop
+        self.loop_complete = False
+
+    # _progress reports graph-owned completion rather than mutable timing repetitions.
+    def _progress(self, status):
+        completed = self.loop + int(self.loop_complete)
+        return {
+            "benchmarks_completed": self.benchmarks,
+            "completed": completed,
+            "loop": self.loop + 1,
+            "loops": self.loops,
+            "percent": 100 * completed / self.loops,
+            "status": status,
         }
 
     # benchmark validates one complete candidate and returns host-owned JSON evidence to the graph.
@@ -989,20 +1207,27 @@ class _BenchmarkTrack:
 
         source_hash = hashlib.sha256(candidate.encode()).hexdigest()
         with self.lock:
-            if source_hash in self.evaluated:
-                cached = {**self.evaluated[source_hash], "cached": True}
-                return self._respond(cached)
-            if self.benchmarks >= self.budget:
+            if self.loop_complete:
                 return self._respond(
                     {
                         "correct": False,
-                        "error": "benchmark budget exhausted; conclude with the best result",
+                        "error": "this graph loop already benchmarked a candidate; conclude the loop",
+                        "progress": self._progress("loop_complete"),
                         "source_sha256": source_hash,
                     }
                 )
+            if source_hash in self.evaluated:
+                cached = {
+                    **self.evaluated[source_hash],
+                    "cached": True,
+                    "progress": self._progress("needs_new_candidate"),
+                }
+                return self._respond(cached)
 
             # Evaluators share one GPU or remote sandbox, so the lock also prevents overlapping timings.
             self.benchmarks += 1
+            self.loop_complete = True
+            print(f"loop {self.loop + 1}/{self.loops}: profiling candidate")
             try:
                 evaluation = self.evaluator.evaluate(candidate)
                 score = _report_score(evaluation, "candidate")
@@ -1010,6 +1235,7 @@ class _BenchmarkTrack:
                 report = {
                     "correct": False,
                     "error": _summarize(error),
+                    "progress": self._progress("loop_complete"),
                     "source_sha256": source_hash,
                 }
             else:
@@ -1025,13 +1251,14 @@ class _BenchmarkTrack:
                     / self.baseline_score,
                     "improvement_vs_best": (previous_best - score) / previous_best,
                     "lower_is_better": True,
+                    "progress": self._progress("loop_complete"),
                     "requested_chip": self.evaluator.chip,
                     "score": score,
                     "source_sha256": source_hash,
                 }
             self.evaluated[source_hash] = report
             print(
-                f"benchmark {self.benchmarks}/{self.budget}: "
+                f"loop {self.loop + 1}/{self.loops} complete: "
                 f"{report.get('score', report.get('error'))}"
             )
             return self._respond(report)
@@ -1087,7 +1314,10 @@ def _agent_instructions(settings, evaluator):
             "in the calling process.\n"
             f"- Trusted candidate evaluation runs in {evaluator.execution}.\n"
             f"- The evaluator observed this exact target: {evaluator.chip}.\n"
-            "- Only benchmark_candidate executes candidates on that target."
+            "- Only benchmark_candidate executes candidates on that target.\n"
+            f"- The outer LangGraph enforces {settings.loops} benchmark/profile "
+            f"loops and a {MAX_AGENT_STEPS}-step safety ceiling.\n"
+            "- Complete reports are persisted under /profiles as well as returned by the tool."
         ),
     ]
     total = 0
@@ -1137,8 +1367,6 @@ def _run_agent(source, settings, evaluator, workspace_dir):
     baseline_report = evaluator.evaluate(source)
     baseline_score = _report_score(baseline_report, "baseline")
     print(f"baseline: {baseline_score:.6g}")
-    if settings.benchmark_budget == 0:
-        return _AgentResult(source, baseline_score, baseline_score, 0, 0)
 
     try:
         from deepagents import create_deep_agent
@@ -1149,6 +1377,7 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         )
         from langchain_core.tools import tool
         from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.graph import END, START, StateGraph
     except ImportError as error:
         raise RuntimeError(
             "Tilesmith requires deepagents and langchain-openai"
@@ -1158,10 +1387,10 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         source,
         baseline_report,
         evaluator,
-        settings.benchmark_budget,
+        settings.loops,
     )
     workspace = _AttemptWorkspace(workspace_dir, source)
-    next_path = workspace.prepare_next()
+    workspace.write_report("baseline", baseline_report)
 
     @tool
     def benchmark_candidate(path: str) -> str:
@@ -1179,10 +1408,10 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         report = json.loads(track.benchmark(candidate))
         report["attempt_path"] = attempt_path
         if track.benchmarks > previous_benchmarks:
-            if track.benchmarks < track.budget:
-                report["next_path"] = workspace.prepare_next(candidate)
-        else:
-            report["next_path"] = attempt_path
+            report["report_path"] = workspace.write_report(
+                f"loop_{track.loop:02d}",
+                report,
+            )
         return json.dumps(report, default=str, sort_keys=True)
 
     # LocalShellBackend adds Deep Agents' execute tool while withholding host credentials.
@@ -1195,7 +1424,7 @@ def _run_agent(source, settings, evaluator, workspace_dir):
     )
 
     # Keep the graph free-form while evicting source-heavy benchmark turns beyond the newest five.
-    graph = create_deep_agent(
+    agent = create_deep_agent(
         model=_chat_model(settings),
         tools=[benchmark_candidate, {"type": "web_search"}],
         system_prompt=_agent_instructions(settings, evaluator),
@@ -1207,21 +1436,52 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         backend=backend,
         name="tilesmith-kernel-optimizer",
     )
-    try:
-        result = graph.invoke(
+
+    # optimize_loop runs one autonomous Deep Agent round and advances only after its benchmark tool succeeds.
+    def optimize_loop(state):
+        completed = state["completed"]
+        if track.loop != completed:
+            path = workspace.prepare_next()
+            track.start_loop(completed)
+        else:
+            path = state["path"]
+        result = agent.invoke(
             {
                 "messages": [
                     {
                         "role": "user",
                         "content": (
-                            f"Optimize {next_path} for {evaluator.chip}. The file is "
-                            "a copy of the latest attempt. You may benchmark "
-                            f"up to {settings.benchmark_budget} unique candidates."
+                            f"Optimization loop {completed + 1}/{settings.loops}. "
+                            f"Improve {path} for {evaluator.chip}. This loop must "
+                            "finish by calling benchmark_candidate on one new candidate."
                         ),
                     }
-                ],
+                ]
             },
-            config={"configurable": {"thread_id": workspace.directory.name}},
+            config={
+                "configurable": {"thread_id": workspace.directory.name},
+                "recursion_limit": MAX_AGENT_STEPS,
+            },
+        )
+        return {
+            "completed": completed + int(track.loop_complete),
+            "messages": result.get("messages", []),
+            "path": path,
+        }
+
+    # continue_loops makes the requested measurement count an explicit graph invariant.
+    def continue_loops(state):
+        return END if state["completed"] >= settings.loops else "optimize"
+
+    loop_builder = StateGraph(_LoopState)
+    loop_builder.add_node("optimize", optimize_loop)
+    loop_builder.add_edge(START, "optimize")
+    loop_builder.add_conditional_edges("optimize", continue_loops)
+    loop_graph = loop_builder.compile()
+    try:
+        result = loop_graph.invoke(
+            {"completed": 0, "messages": [], "path": ""},
+            config={"recursion_limit": MAX_AGENT_STEPS},
         )
     finally:
         workspace.normalize_all()

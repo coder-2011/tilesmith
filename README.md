@@ -28,7 +28,7 @@ Use Tilesmith like `torch.compile`:
 ```python
 import tilesmith
 
-optimized_model = tilesmith.compile(model, example_inputs=(x,))
+optimized_model = tilesmith.compile(model, example_inputs=(x,), loops=1)
 output = optimized_model(x)
 ```
 
@@ -89,14 +89,24 @@ Tilesmith only with models and workloads you trust. Candidate execution remains
 exclusive to the benchmark tool.
 
 The graph chooses its own optimization workflow. The host restricts only the
-expensive boundary: `TILESMITH_BENCHMARKS` is the number of unique candidate
-benchmarks, defaulting to four. Duplicate source reuses its prior result. The
-model context retains the five newest benchmark payloads without discarding
-other tool work. The tool reads the named attempt, restores its trusted FX
-comment header, rejects incorrect source before timing, and reports the exact
-evaluator chip and source hash. The host selects the fastest
-successfully measured candidate regardless of the agent's final text and runs
-a fresh confirmation before installation.
+expensive boundary: `loops` is the number of benchmark/profile cycles and
+defaults to one. A parent LangGraph advances only after
+`benchmark_candidate(path)` measures one new candidate; duplicate source does
+not consume a loop. Both the parent graph and each Deep Agent round have a
+fixed 70-step safety ceiling. Timing repetitions are intentionally internal,
+not user-configurable. The model context retains the five newest benchmark
+payloads without discarding other tool work.
+
+The tool reads the named attempt, restores its trusted FX comment header,
+rejects incorrect source before timing, and returns loop progress, every raw
+timing sample, a complete PyTorch/Kineto Chrome trace, operator summaries,
+stacks, the raw memory timeline, allocator statistics/snapshot, GPU metadata,
+and the exact evaluator chip. ComputeSDK evaluation also runs Nsight Compute's
+full metric set when `ncu` is installed, returning its raw CSV or the complete
+availability/failure result. Every packet is also retained under the graph's
+`profiles/` directory. The host selects the fastest successfully measured
+candidate regardless of the agent's final text and runs a fresh confirmation
+before installation.
 
 Correctness covers normal, zero, and high-magnitude inputs against the original
 TorchInductor callable. Timing uses 25 warmups, alternating baseline/candidate
@@ -116,7 +126,7 @@ After exporting the LLM and ComputeSDK variables above, run the explicit paid
 fixture:
 
 ```sh
-python3 benchmark.py run --benchmarks 4
+python3 benchmark.py run --loops 1
 ```
 
 It provisions one H100, extracts the included `4096 × 4096` fp16 RMSNorm, and
