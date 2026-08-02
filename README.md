@@ -103,54 +103,5 @@ agent can find an obvious win; its speedup is not a claim about unmodified
 TorchInductor output.
 
 Ordinary `go test ./...` never invokes Modal. Only `benchmark.py run` provisions
-the paid GPU.
-
-## Manual use
-
-Deploy the evaluator and extract `generated.py` from your workload:
-
-```sh
-modal deploy modal_app.py
-modal run -q modal_app.py --action extract
-
-go run . \
-  -kernel generated.py \
-  -evaluate 'python3 benchmark.py evaluate --profile tilesmith-h100 --workload workload.py' \
-  -skill "$HOME/.codex/skills/check-normal/SKILL.md" \
-  -skill "$HOME/.codex/skills/high-performance-cuda" \
-  -iterations 4 \
-  -timeout 20m
-```
-
-The evaluator receives each candidate in `TILESMITH_KERNEL`. It copies that
-source and the local workload into Modal, checks normal, zero, and
-high-magnitude inputs against eager PyTorch, then alternates eager and candidate
-timing on the H100. A named Modal Volume persists the source-hashed
-TorchInductor/Triton cache between runs. Credentials stay in the Modal profile
-and are never written into this repository.
-
-`-skill` accepts either a file or a directory containing `SKILL.md` and can be
-repeated. Skill files are trusted developer context, so only pass guidance you
-control. Up to 8 MiB is accepted. Use `-web-search=false` only for a model or
-proxy route that cannot provide the hosted tool.
-
-`workload.py` is also the customization interface. Replace `model()` and
-`make_inputs()` with a self-contained workload; optionally provide
-`make_cases()`, `ATOL`, `RTOL`, and the benchmark constants shown in the example.
-
-## Using the result
-
-The installed file is the callable Python actually benchmarks. On an NVIDIA
-machine, load it before the training loop and call its generated interface:
-
-```python
-import runpy
-
-kernel = runpy.run_path("generated.py")
-(output,) = kernel["call"]([input_tensor])
-```
-
-Replacing `generated.py` does not mutate a `torch.compile` callable that is
-already loaded in memory. Restart that process or load the optimized artifact
-before use. Tilesmith atomically replaces the file only after a confirmed
-speedup; otherwise the original remains unchanged.
+the paid GPU. Modal credentials stay in the local profile and are never written
+into this repository.

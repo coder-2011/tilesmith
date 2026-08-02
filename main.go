@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,15 +46,12 @@ const maxToolRounds = 6
 type settings struct {
 	kernel         string
 	evaluate       string
-	check          string
-	bench          string
 	config         string
 	model          string
 	chip           string
 	skills         []string
 	webSearch      bool
 	iterations     int
-	trials         int
 	minImprovement float64
 	timeout        time.Duration
 }
@@ -260,8 +256,6 @@ func parseSettings() (settings, error) {
 	var cfg settings
 	flag.StringVar(&cfg.kernel, "kernel", "", "generated Triton Python file to optimize")
 	flag.StringVar(&cfg.evaluate, "evaluate", "", "combined correctness and benchmark command for $TILESMITH_KERNEL")
-	flag.StringVar(&cfg.check, "check", "", "shell command that validates $TILESMITH_KERNEL")
-	flag.StringVar(&cfg.bench, "bench", "", "shell command whose last output line is a lower-is-better score")
 	flag.StringVar(&cfg.config, "config", os.Getenv("CLIPROXY_CONFIG"), "CLIProxyAPI config file")
 	flag.StringVar(&cfg.model, "model", os.Getenv("TILESMITH_MODEL"), "model routed by CLIProxyAPI")
 	flag.StringVar(&cfg.chip, "chip", "", "GPU model and compute capability used for evaluation")
@@ -271,19 +265,15 @@ func parseSettings() (settings, error) {
 	})
 	flag.BoolVar(&cfg.webSearch, "web-search", true, "give the agent hosted web search and require it on the first turn")
 	flag.IntVar(&cfg.iterations, "iterations", 8, "maximum model proposals; zero only measures the baseline")
-	flag.IntVar(&cfg.trials, "trials", 3, "benchmark trials per candidate")
 	flag.Float64Var(&cfg.minImprovement, "min-improvement", 0.01, "required fractional improvement")
 	flag.DurationVar(&cfg.timeout, "timeout", 10*time.Minute, "timeout for each model or Python command")
 	flag.Parse()
 
-	if cfg.kernel == "" || (cfg.evaluate == "" && (cfg.check == "" || cfg.bench == "")) {
-		return cfg, errors.New("-kernel and either -evaluate or both -check and -bench are required")
+	if cfg.kernel == "" || cfg.evaluate == "" {
+		return cfg, errors.New("-kernel and -evaluate are required")
 	}
-	if cfg.evaluate != "" && (cfg.check != "" || cfg.bench != "") {
-		return cfg, errors.New("-evaluate cannot be combined with -check or -bench")
-	}
-	if cfg.iterations < 0 || cfg.trials < 1 || cfg.timeout <= 0 {
-		return cfg, errors.New("-iterations must be non-negative, -trials positive, and -timeout greater than zero")
+	if cfg.iterations < 0 || cfg.timeout <= 0 {
+		return cfg, errors.New("-iterations must be non-negative and -timeout greater than zero")
 	}
 	if cfg.minImprovement < 0 || cfg.minImprovement >= 1 {
 		return cfg, errors.New("-min-improvement must be in [0, 1)")
@@ -723,42 +713,16 @@ func benchmarkOutput(result evaluation, bestScore float64, chip string, source [
 	return string(encoded), nil
 }
 
-// evaluate checks correctness first, then returns the median benchmark score and structured evidence.
+// evaluate runs the host-owned correctness and benchmark command and parses its structured evidence.
 func evaluate(ctx context.Context, cfg settings, kernelPath string) (evaluation, error) {
-	if cfg.evaluate != "" {
-		output, err := runCommand(ctx, cfg.evaluate, kernelPath, cfg.timeout)
-		if err != nil {
-			return evaluation{}, fmt.Errorf("evaluation command: %w: %s", err, summarize(output))
-		}
-		return parseEvaluation(output)
+	output, err := runCommand(ctx, cfg.evaluate, kernelPath, cfg.timeout)
+	if err != nil {
+		return evaluation{}, fmt.Errorf("evaluation command: %w: %s", err, summarize(output))
 	}
-
-	if output, err := runCommand(ctx, cfg.check, kernelPath, cfg.timeout); err != nil {
-		return evaluation{}, fmt.Errorf("correctness command: %w: %s", err, summarize(output))
-	}
-
-	scores := make([]float64, 0, cfg.trials)
-	for trial := 0; trial < cfg.trials; trial++ {
-		output, err := runCommand(ctx, cfg.bench, kernelPath, cfg.timeout)
-		if err != nil {
-			return evaluation{}, fmt.Errorf("benchmark command: %w: %s", err, summarize(output))
-		}
-		score, err := parseScore(output)
-		if err != nil {
-			return evaluation{}, err
-		}
-		scores = append(scores, score)
-	}
-
-	sort.Float64s(scores)
-	middle := len(scores) / 2
-	if len(scores)%2 == 1 {
-		return evaluation{Score: scores[middle]}, nil
-	}
-	return evaluation{Score: (scores[middle-1] + scores[middle]) / 2}, nil
+	return parseEvaluation(output)
 }
 
-// runCommand executes a user-owned Python shell command against one candidate path.
+// runCommand executes the evaluator against one candidate path.
 func runCommand(ctx context.Context, command, kernelPath string, timeout time.Duration) (string, error) {
 	commandContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

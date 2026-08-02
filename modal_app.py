@@ -1,6 +1,5 @@
 import importlib.util
 import io
-import json
 import os
 import statistics
 import subprocess
@@ -265,9 +264,12 @@ def _benchmark(torch, workload, kernel):
     )
 
 
-# run_gpu extracts, checks, or benchmarks one generated wrapper on an NVIDIA H100.
+# benchmark_fixture extracts or evaluates the controlled generated wrapper on an NVIDIA H100.
 @app.function(image=image, gpu="H100!", timeout=1200, volumes={"/cache": cache})
-def run_gpu(action, workload_source, kernel_source):
+def benchmark_fixture(action, workload_source, kernel_source):
+    if action not in {"extract", "evaluate"}:
+        raise ValueError("action must be extract or evaluate")
+
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/cache/torchinductor"
 
     import torch
@@ -292,15 +294,22 @@ def run_gpu(action, workload_source, kernel_source):
         kernel_path.write_text(kernel_source, encoding="utf-8")
         kernel = _load_module("tilesmith_candidate", kernel_path)
         metadata["cases"] = _check(torch, workload, kernel)
-        if action in {"bench", "evaluate"}:
-            metadata.update(_benchmark(torch, workload, kernel))
+        metadata.update(_benchmark(torch, workload, kernel))
         cache.commit()
         return metadata
 
 
 # compare_generated benchmarks unmodified PyTorch-Inductor and candidate wrappers on an exact H100.
 @app.function(image=image, gpu="H100!", timeout=1200, volumes={"/cache": cache})
-def compare_generated(baseline_source, candidate_source, payload, expected_chip):
+def compare_generated(
+    baseline_source,
+    candidate_source,
+    payload,
+    expected_chip,
+    warmup,
+    iterations,
+    sample_count,
+):
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/cache/torchinductor"
 
     import torch
@@ -341,34 +350,11 @@ def compare_generated(baseline_source, candidate_source, payload, expected_chip)
                 measured,
                 cuda_inputs,
                 "torch_inductor",
-                25,
-                100,
-                7,
+                warmup,
+                iterations,
+                sample_count,
             )
         )
         metadata["reference"] = "torch_inductor_generated"
         cache.commit()
         return metadata
-
-
-# main transfers local source to Modal so remote code never depends on local absolute paths.
-@app.local_entrypoint()
-def main(
-    action: str = "extract", workload: str = "workload.py", kernel: str = "generated.py"
-):
-    if action not in {"extract", "check", "bench", "evaluate"}:
-        raise ValueError("action must be extract, check, bench, or evaluate")
-
-    workload_source = Path(workload).read_text(encoding="utf-8")
-    kernel_path = Path(os.environ.get("TILESMITH_KERNEL", kernel))
-    kernel_source = ""
-    if action != "extract":
-        kernel_source = kernel_path.read_text(encoding="utf-8")
-
-    result = run_gpu.remote(action, workload_source, kernel_source)
-    if action == "extract":
-        source = result.pop("source")
-        kernel_path.write_text(source, encoding="utf-8")
-    print(json.dumps(result, sort_keys=True))
-    if action in {"bench", "evaluate"}:
-        print(f"{result['score']:.9g}")

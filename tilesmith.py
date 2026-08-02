@@ -518,6 +518,9 @@ class _ModalEvaluator:
             source,
             self.payload,
             self.chip,
+            WARMUP,
+            BENCH_ITERATIONS,
+            BENCH_SAMPLES,
         )
 
 

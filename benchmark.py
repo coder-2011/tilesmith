@@ -9,25 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from tilesmith import _default_skills
+
 
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "tilesmith"
-FUNCTION_NAME = "run_gpu"
-
-
-# _default_skills finds the user's relevant Codex guidance without making it a repository dependency.
-def _default_skills():
-    skill_root = Path.home() / ".codex" / "skills"
-    cuda_root = skill_root / "high-performance-cuda"
-    candidates = [
-        skill_root / "check-normal" / "SKILL.md",
-        cuda_root / "SKILL.md",
-        cuda_root / "references" / "core-principles.md",
-        cuda_root / "references" / "autotuning-and-benchmarking.md",
-        cuda_root / "references" / "numerical-correctness.md",
-        cuda_root / "references" / "triton-and-codegen.md",
-    ]
-    return [str(path) for path in candidates if path.is_file()]
+FUNCTION_NAME = "benchmark_fixture"
 
 
 # _remote invokes the deployed H100 evaluator without embedding Modal credentials.
@@ -74,7 +61,7 @@ def _evaluate(args):
     kernel_path = os.environ.get("TILESMITH_KERNEL")
     if not kernel_path:
         raise RuntimeError("TILESMITH_KERNEL is required for evaluation")
-    workload_source = Path(args.workload).read_text(encoding="utf-8")
+    workload_source = (ROOT / "workload.py").read_text(encoding="utf-8")
     kernel_source = Path(kernel_path).read_text(encoding="utf-8")
     result = _remote(args.profile, "evaluate", workload_source, kernel_source)
     print(json.dumps(result, sort_keys=True))
@@ -92,7 +79,7 @@ def _run(args):
     if not args.config:
         raise ValueError("--config or CLIPROXY_CONFIG is required")
 
-    workload_path = Path(args.workload).resolve()
+    workload_path = ROOT / "workload.py"
     workload_source = workload_path.read_text(encoding="utf-8")
     skills = args.skill if args.skill is not None else _default_skills()
     _deploy(args.profile)
@@ -111,8 +98,6 @@ def _run(args):
                 "evaluate",
                 "--profile",
                 args.profile,
-                "--workload",
-                str(workload_path),
             ]
         )
         command = [
@@ -201,11 +186,9 @@ def _parse_args():
     run_parser.add_argument("--model", default=os.environ.get("TILESMITH_MODEL", "gpt-5.5"))
     run_parser.add_argument("--profile", default=os.environ.get("MODAL_PROFILE", "tilesmith-h100"))
     run_parser.add_argument("--skill", action="append", help="trusted skill or reference file; repeatable")
-    run_parser.add_argument("--workload", default=str(ROOT / "workload.py"))
 
     evaluate_parser = commands.add_parser("evaluate", help="evaluate one agent candidate")
     evaluate_parser.add_argument("--profile", required=True)
-    evaluate_parser.add_argument("--workload", required=True)
     return parser.parse_args()
 
 
