@@ -106,6 +106,20 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIs(calls[0][2]["inner_compile"].__self__, backend)
         self.assertEqual(patches, [{"enable_autograd_cache": False}])
 
+    # test_agency_controls_prompt_scope keeps the public policy explicit and rejects ambiguous levels.
+    def test_agency_controls_prompt_scope(self):
+        low = Mock(agency="low", loops=1, max_model_calls=None, skills=())
+        high = Mock(agency="high", loops=1, max_model_calls=None, skills=())
+
+        low_prompt = tilesmith._agent_instructions(low, _Evaluator())
+        high_prompt = tilesmith._agent_instructions(high, _Evaluator())
+
+        self.assertIn("Keep the existing wrapper", low_prompt)
+        self.assertIn("Do not fuse, split, add, or remove kernels", low_prompt)
+        self.assertIn("fuse, split, add, or remove kernels", high_prompt)
+        with self.assertRaisesRegex(ValueError, "agency must be 'low' or 'high'"):
+            tilesmith._read_settings(None, "", agency="medium")
+
     # test_track_enforces_one_new_benchmark_per_loop checks the costly stateful edge cases together.
     def test_track_enforces_one_new_benchmark_per_loop(self):
         evaluator = _Evaluator()
@@ -362,6 +376,7 @@ class TilesmithAgentTests(unittest.TestCase):
             ]
         )
         settings = tilesmith._Settings(
+            agency="high",
             cache_dir=Path("/tmp"),
             compute=None,
             loops=2,
@@ -423,6 +438,7 @@ class TilesmithAgentTests(unittest.TestCase):
     def test_model_call_limit_counts_provider_calls(self):
         model = _ToolModel(responses=[AIMessage(content="no candidate edit")])
         settings = tilesmith._Settings(
+            agency="high",
             cache_dir=Path("/tmp"),
             compute=None,
             loops=1,

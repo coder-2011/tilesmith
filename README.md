@@ -39,6 +39,7 @@ requested model appears in `/v1/models` before starting an optimization.
 optimized_model = tilesmith.compile(
     model,
     example_inputs=(x,),
+    agency="high",
     loops=1,
     max_model_calls=None,
 )
@@ -47,6 +48,14 @@ optimized_model = tilesmith.compile(
 `example_inputs` must be a tuple with at least one CUDA tensor. Compilation is
 lazy: PyTorch finishes compiling first, and the first real invocation supplies
 the concrete tensors used for Tilesmith's correctness and timing checks.
+
+`agency` controls how broadly the agent may alter generated code. It defaults
+to `"high"`, which permits redesigning wrapper logic, algorithms, intermediate
+buffers, and kernel fusion or decomposition. `"low"` preserves the existing
+wrapper and kernel boundaries while allowing local changes such as coalescing,
+tile sizes, launch parameters, vectorization, and redundant-work removal. Both
+levels preserve the generated callable ABI and pass the same host-owned
+correctness, timing, and fresh-confirmation gates.
 
 `loops` counts accepted optimization cycles, not agent turns or timing
 repetitions. It defaults to `1`. A slower, incorrect, duplicate, or marginal
@@ -178,7 +187,7 @@ calls, which also exercises the absence of a hidden 70-call limit.
 
 Accepted source is cached under `~/.cache/tilesmith`. Its key includes the
 generated source, Inductor graph identity, PyTorch/Triton/CUDA stack, NVIDIA
-device, model, loop count, optional model-call budget, required improvement,
+device, model, agency, loop count, optional model-call budget, required improvement,
 sandbox placement, and loaded skill contents. Repeating the same compile loads
 that exact accepted source without rerunning the agent or provisioning another
 sandbox. A changed graph receives a distinct track and starts from its own
