@@ -4,9 +4,9 @@
 
 Tilesmith is a small optimization layer for PyTorch. PyTorch still performs
 graph capture, AOTAutograd, and TorchInductor compilation. After Inductor emits
-an eligible Triton wrapper, Tilesmith gives that generated code to a Deep Agent,
-measures its candidates against the original wrapper, and installs only a
-numerically correct, independently confirmed speedup.
+an eligible CUDA wrapper, Tilesmith gives that complete generated implementation
+to a Deep Agent, measures its candidates against the original wrapper, and
+installs only a numerically correct, independently confirmed speedup.
 
 ```python
 import tilesmith
@@ -39,7 +39,7 @@ requested model appears in `/v1/models` before starting an optimization.
 optimized_model = tilesmith.compile(
     model,
     example_inputs=(x,),
-    agency="high",
+    agency="medium",
     loops=1,
     max_model_calls=None,
 )
@@ -49,12 +49,13 @@ optimized_model = tilesmith.compile(
 lazy: PyTorch finishes compiling first, and the first real invocation supplies
 the concrete tensors used for Tilesmith's correctness and timing checks.
 
-`agency` controls how broadly the agent may alter generated code. It defaults
-to `"high"`, which permits redesigning wrapper logic, algorithms, intermediate
-buffers, and kernel fusion or decomposition. `"low"` preserves the existing
-wrapper and kernel boundaries while allowing local changes such as coalescing,
-tile sizes, launch parameters, vectorization, and redundant-work removal. Both
-levels preserve the generated callable ABI and pass the same host-owned
+`agency` controls how broadly the agent may alter generated code. `"low"`
+preserves the existing wrapper and kernel boundaries while allowing localized
+tuning such as coalescing, tile sizes, launch parameters, and vectorization.
+The default `"medium"` may restructure wrapper logic, intermediate buffers,
+and kernel fusion or decomposition while preserving the high-level algorithm.
+`"high"` may also redesign the algorithm and generated implementation. All
+three levels preserve the generated callable ABI and pass the same host-owned
 correctness, timing, and fresh-confirmation gates.
 
 `loops` counts accepted optimization cycles, not agent turns or timing
@@ -68,9 +69,11 @@ example, `max_model_calls=70` permits exactly 70 model calls and blocks the
 71st. If an explicit budget expires without a validated win, Tilesmith keeps
 ordinary Inductor rather than installing an unconfirmed candidate.
 
-Dynamic-shape, mixed-device, multi-GPU, input-mutating, non-Triton, and already
-wrapped graphs currently stay on ordinary Inductor. Inductor's FX and generated
-code caches remain enabled.
+Dynamic-shape, mixed-device, multi-GPU, input-mutating, and already wrapped
+graphs currently stay on ordinary Inductor. A raw single-GPU CUDA wrapper stays
+eligible whether it embeds Triton or generated CUDA templates, calls external
+libraries, or combines them. Inductor's FX and generated-code caches remain
+enabled.
 
 ## What the agent does
 
@@ -92,10 +95,18 @@ The graph keeps five rolling source files:
 ```
 
 Every attempt starts with the captured PyTorch FX program as comments, followed
-by the executable Inductor/Triton source. A new turn copies the most recently
-evaluated source. After `attempt_04.py`, the oldest contents are discarded and
-the other attempts shift down. Complete host reports and structured agent
-traces are retained beside the attempts under `profiles/`.
+by one canonical Inductor-generated Python wrapper for that graph. The wrapper
+contains its `call(args)` entry point, allocations, streams, launches, embedded
+Triton or generated-template source when Inductor emits it, and external-library
+call sites. Library implementations, weights, PTX, cubins, and shared objects
+remain runtime dependencies or cache artifacts rather than being copied into
+the attempt. Forward, backward, graph-break, and shape-specialized graphs each
+receive their own track instead of being merged into one model-sized file.
+
+A new turn copies the most recently evaluated source. After `attempt_04.py`,
+the oldest contents are discarded and the other attempts shift down. Complete
+host reports and structured agent traces are retained beside the attempts under
+`profiles/`.
 
 An agent final answer ends only that agent turn. The outer LangGraph does not
 finish a requested loop until the host:
@@ -142,6 +153,11 @@ Sandbox ownership is deterministic. Tilesmith awaits sandbox destruction
 before closing the ComputeSDK client and its event loop, on both success and
 exception paths. The end-to-end run below completed with no TileSmith Modal
 container or ComputeSDK bridge process from this checkout left running.
+
+A focused L4 smoke test also compiled `x @ y` into a 3,188-byte wrapper that
+called `extern_kernels.mm` and contained no Triton kernel. Reloading that exact
+source through Inductor's `PyCodeCache` preserved numerical parity, and the
+sandbox was destroyed after the check.
 
 Modal is the default provider. Other ComputeSDK providers can be selected with
 `COMPUTESDK_PROVIDER`, `COMPUTESDK_PROVIDER_PACKAGE`,

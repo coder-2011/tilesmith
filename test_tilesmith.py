@@ -106,19 +106,69 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIs(calls[0][2]["inner_compile"].__self__, backend)
         self.assertEqual(patches, [{"enable_autograd_cache": False}])
 
+    # test_backend_wraps_external_cuda_source keeps non-Triton Inductor wrappers eligible.
+    def test_backend_wraps_external_cuda_source(self):
+        compiled_type = type("CompiledFxGraph", (), {})
+        compiled = compiled_type()
+        compiled._fx_graph_cache_key = "graph-key"
+        compiled.cache_key = "code-key"
+        compiled.current_callable = Mock(name="inductor_call")
+        compiled.device_idxs = {0}
+        compiled.device_types = {"cuda"}
+        compiled.mutated_input_idxs = ()
+        compiled.source_code = (
+            "from torch._inductor.select_algorithm import extern_kernels\n"
+            "def call(args):\n"
+            "    return extern_kernels.mm(*args)\n"
+        )
+
+        torch_module = ModuleType("torch")
+        torch_module.SymInt = type("SymInt", (), {})
+        torch_module.is_tensor = Mock(return_value=False)
+        compile_module = ModuleType("torch._inductor.compile_fx")
+        compile_module.compile_fx_inner = Mock(return_value=compiled)
+        output_module = ModuleType("torch._inductor.output_code")
+        output_module.CompiledFxGraph = compiled_type
+        constants = Mock()
+        constants.unwrap.return_value = {}
+        output_module.CompiledFxGraphConstantsWithGm = Mock(return_value=constants)
+        modules = {
+            "torch": torch_module,
+            "torch._inductor.compile_fx": compile_module,
+            "torch._inductor.output_code": output_module,
+        }
+
+        backend = tilesmith._Backend(Mock(compute=None))
+        graph_module = Mock(code="def forward(self, x):\n    return x")
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(tilesmith, "_is_raw_generated_call", return_value=True),
+        ):
+            result = backend._inner_compile(graph_module, [])
+
+        self.assertIs(result, compiled)
+        self.assertIsInstance(compiled.current_callable, tilesmith._LazyKernel)
+        self.assertIn("extern_kernels.mm", compiled.current_callable.source)
+        self.assertIn(tilesmith.REFERENCE_START, compiled.current_callable.source)
+
     # test_agency_controls_prompt_scope keeps the public policy explicit and rejects ambiguous levels.
     def test_agency_controls_prompt_scope(self):
         low = Mock(agency="low", loops=1, max_model_calls=None, skills=())
+        medium = Mock(agency="medium", loops=1, max_model_calls=None, skills=())
         high = Mock(agency="high", loops=1, max_model_calls=None, skills=())
 
         low_prompt = tilesmith._agent_instructions(low, _Evaluator())
+        medium_prompt = tilesmith._agent_instructions(medium, _Evaluator())
         high_prompt = tilesmith._agent_instructions(high, _Evaluator())
 
         self.assertIn("Keep the existing wrapper", low_prompt)
         self.assertIn("Do not fuse, split, add, or remove kernels", low_prompt)
+        self.assertIn("kernel fusion or decomposition", medium_prompt)
+        self.assertIn("Preserve the high-level algorithm", medium_prompt)
         self.assertIn("fuse, split, add, or remove kernels", high_prompt)
-        with self.assertRaisesRegex(ValueError, "agency must be 'low' or 'high'"):
-            tilesmith._read_settings(None, "", agency="medium")
+        self.assertEqual(tilesmith._read_settings(None, "").agency, "medium")
+        with self.assertRaisesRegex(ValueError, "agency must be 'low', 'medium'"):
+            tilesmith._read_settings(None, "", agency="unbounded")
 
     # test_track_enforces_one_new_benchmark_per_loop checks the costly stateful edge cases together.
     def test_track_enforces_one_new_benchmark_per_loop(self):
