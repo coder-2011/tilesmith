@@ -68,21 +68,34 @@ async def _upload_runtime(sandbox):
         str(Path(destination).parent) for destination in _skill_files().values()
     }
     directories.add(REMOTE_ROOT)
+    directories.add(f"{REMOTE_ROOT}/tilesmith/sandboxes")
     command = "mkdir -p " + " ".join(sorted(directories))
     _require_success(
         await sandbox.run_command(command, timeout_ms=60_000),
         "remote directory setup",
     )
-    for name in (
-        "measurement.py",
-        "moe_benchmark.py",
-        "requirements.txt",
-        "tilesmith.py",
+    package_root = ROOT / "src" / "tilesmith"
+    remote_package = f"{REMOTE_ROOT}/tilesmith"
+    for source, destination in (
+        (ROOT / "moe_benchmark.py", f"{REMOTE_ROOT}/moe_benchmark.py"),
+        (ROOT / "requirements.txt", f"{REMOTE_ROOT}/requirements.txt"),
+        (package_root / "__init__.py", f"{remote_package}/__init__.py"),
+        (package_root / "measurement.py", f"{remote_package}/measurement.py"),
+        (package_root / "sandbox_worker.py", f"{remote_package}/sandbox_worker.py"),
+        (
+            package_root / "sandboxes" / "__init__.py",
+            f"{remote_package}/sandboxes/__init__.py",
+        ),
+        (
+            package_root / "sandboxes" / "_computesdk_bridge.cjs",
+            f"{remote_package}/sandboxes/_computesdk_bridge.cjs",
+        ),
+        (
+            package_root / "sandboxes" / "computesdk.py",
+            f"{remote_package}/sandboxes/computesdk.py",
+        ),
     ):
-        await sandbox.write_file(
-            f"{REMOTE_ROOT}/{name}",
-            (ROOT / name).read_text(encoding="utf-8"),
-        )
+        await sandbox.write_file(destination, source.read_text(encoding="utf-8"))
     for source, destination in _skill_files().items():
         await sandbox.write_file(destination, source.read_text(encoding="utf-8"))
 
@@ -137,8 +150,8 @@ async def _run_worker(sandbox, environment):
 # _run_remote owns the paid GPU lifecycle and streams progress to the caller.
 async def _run_remote(model, chip):
     """Provision one requested GPU, run the worker, and always tear it down."""
-    from measurement import chip_matches
-    from sandboxes.computesdk import ComputeSDKClient, ProviderSpec
+    from tilesmith.measurement import chip_matches
+    from tilesmith.sandboxes.computesdk import ComputeSDKClient, ProviderSpec
     from tilesmith import SANDBOX_READY_TIMEOUT_MS, _read_compute_config
 
     config = _read_compute_config(chip)

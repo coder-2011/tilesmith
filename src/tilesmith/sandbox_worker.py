@@ -7,11 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from measurement import (
-    assert_candidate_matches,
-    benchmark_pair,
-    chip_matches,
-)
+try:
+    from .measurement import assert_candidate_matches, benchmark_pair, chip_matches
+except ImportError:
+    # The GPU sandbox runs this copied source as worker.py beside measurement.py.
+    from measurement import assert_candidate_matches, benchmark_pair, chip_matches
 
 
 ROOT = Path(__file__).resolve().parent

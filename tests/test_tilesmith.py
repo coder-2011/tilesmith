@@ -334,7 +334,7 @@ class TilesmithAgentTests(unittest.TestCase):
 
     # test_compute_bridge_accepts_large_responses protects generated-source and trace reads.
     def test_compute_bridge_accepts_large_responses(self):
-        from sandboxes.computesdk import _BRIDGE_RESPONSE_LIMIT_BYTES, _Bridge
+        from tilesmith.sandboxes.computesdk import _BRIDGE_RESPONSE_LIMIT_BYTES, _Bridge
 
         # exercise captures the subprocess options without starting npm or a provider.
         async def exercise():

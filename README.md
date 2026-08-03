@@ -21,10 +21,10 @@ replace PyTorch or ask the model to rewrite the user's module.
 ## Install
 
 Start with an environment that already has a matching CUDA build of PyTorch and
-Triton, then install the agent runtime:
+Triton, then install Tilesmith and its agent runtime:
 
 ```sh
-python3 -m pip install -r requirements.txt
+python3 -m pip install -e .
 export OPENAI_API_KEY=...
 export TILESMITH_MODEL=gpt-5.5
 ```

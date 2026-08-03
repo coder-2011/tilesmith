@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
-from measurement import (
+from .measurement import (
     assert_candidate_matches,
     benchmark_pair,
     chip_matches,
@@ -216,7 +216,7 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
 # _read_compute_config validates a direct provider before provisioning a billable sandbox.
 def _read_compute_config(chip):
     try:
-        from sandboxes.computesdk import MODAL_VERSION, ProviderSpec
+        from .sandboxes.computesdk import MODAL_VERSION, ProviderSpec
     except ImportError as error:
         raise RuntimeError(
             "sandbox='computesdk' requires the bundled sandboxes package"
@@ -787,7 +787,7 @@ class _ComputeSandbox:
 
     # __enter__ provisions once, uploads the worker, and verifies the selected GPU.
     def __enter__(self):
-        from sandboxes.computesdk import ComputeSDKClient, ProviderSpec
+        from .sandboxes.computesdk import ComputeSDKClient, ProviderSpec
 
         provider = ProviderSpec(
             package=self.config.provider_package,
