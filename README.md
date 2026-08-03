@@ -1,15 +1,27 @@
 # Tilesmith
 
-Tilesmith is a small addition to `torch.compile`, not an alternative compiler.
-PyTorch runs Dynamo, AOTAutograd, and TorchInductor normally; only after Inductor
-finishes an eligible raw Triton wrapper does Tilesmith ask a LangGraph Deep Agent
-to improve it. A candidate is installed only after reference correctness and
-NVIDIA GPU timing both pass.
+![Tilesmith MoE benchmark on an NVIDIA L4](benchmark.svg)
 
-## PyTorch API
+Tilesmith is a small optimization layer for PyTorch. PyTorch still performs
+graph capture, AOTAutograd, and TorchInductor compilation. After Inductor emits
+an eligible Triton wrapper, Tilesmith gives that generated code to a Deep Agent,
+measures its candidates against the original wrapper, and installs only a
+numerically correct, independently confirmed speedup.
 
-Install the agent dependencies in an environment that already has CUDA,
-PyTorch, and Triton:
+```python
+import tilesmith
+
+optimized_model = tilesmith.compile(model, example_inputs=(x,))
+output = optimized_model(x)
+```
+
+`optimized_model` remains a normal `torch.compile` callable. Tilesmith does not
+replace PyTorch or ask the model to rewrite the user's module.
+
+## Install
+
+Start with an environment that already has a matching CUDA build of PyTorch and
+Triton, then install the agent runtime:
 
 ```sh
 python3 -m pip install -r requirements.txt
@@ -17,42 +29,86 @@ export OPENAI_API_KEY=...
 export TILESMITH_MODEL=gpt-5.5
 ```
 
-`OPENAI_BASE_URL` may point at any OpenAI Responses-compatible gateway,
-including an independently running CLIProxyAPI server:
+`OPENROUTER_API_KEY` is supported as an alternative. An OpenAI-compatible
+gateway can be selected with `OPENAI_BASE_URL`; Tilesmith waits until the
+requested model appears in `/v1/models` before starting an optimization.
 
-```sh
-export OPENAI_BASE_URL=http://127.0.0.1:8317/v1
-export OPENAI_API_KEY=your-proxy-key
-```
-
-Use Tilesmith like `torch.compile`:
+## Compile from PyTorch
 
 ```python
-import tilesmith
-
-optimized_model = tilesmith.compile(model, example_inputs=(x,), loops=1)
-output = optimized_model(x)
+optimized_model = tilesmith.compile(
+    model,
+    example_inputs=(x,),
+    loops=1,
+    max_model_calls=None,
+)
 ```
 
-`tilesmith.compile` returns a normal `torch.compile` callable, so PyTorch keeps
-the model's output structure, autograd integration, compiler configuration, and
-runtime wrappers. Compilation remains lazy: after PyTorch finishes each eligible
-forward or backward Inductor graph, the first real call asks Tilesmith to improve
-that artifact. Dynamic-shape, mixed-device, multi-GPU, input-mutating,
-non-Triton, and wrapped graphs safely stay on ordinary Inductor.
-Tilesmith bypasses only AOTAutograd's higher-level artifact cache because its
-warm hits skip the generated-source hook; Inductor's FX/code caches remain
-enabled. Agent or sandbox failures warn and fall back to ordinary Inductor.
+`example_inputs` must be a tuple with at least one CUDA tensor. Compilation is
+lazy: PyTorch finishes compiling first, and the first real invocation supplies
+the concrete tensors used for Tilesmith's correctness and timing checks.
 
-## Remote benchmarks
+`loops` counts accepted optimization cycles, not agent turns or timing
+repetitions. It defaults to `1`. A slower, incorrect, duplicate, or marginal
+candidate is rejected and the same loop continues.
 
-The agent loop always runs in the calling Python process. To run candidate
-correctness and timing in a ComputeSDK sandbox instead, export the gateway
-configuration and name the execution chip explicitly:
+`max_model_calls` is an optional exact budget shared by the main agent and its
+subagents. It defaults to `None`; there is no default 70-step limit. Shell,
+tool, benchmark, and graph-transition calls do not consume this budget. For
+example, `max_model_calls=70` permits exactly 70 model calls and blocks the
+71st. If an explicit budget expires without a validated win, Tilesmith keeps
+ordinary Inductor rather than installing an unconfirmed candidate.
+
+Dynamic-shape, mixed-device, multi-GPU, input-mutating, non-Triton, and already
+wrapped graphs currently stay on ordinary Inductor. Inductor's FX and generated
+code caches remain enabled.
+
+## What the agent does
+
+Each uncached graph gets a permissive LangGraph Deep Agents workflow. The agent
+can plan, edit files, run bash, delegate a focused subtask, and use normal web
+search. Its system context includes the target GPU, the generated wrapper ABI,
+the host's validation contract, and the installed Triton, CUDA, and kernel
+reference skills.
+
+The graph keeps five rolling source files:
+
+```text
+~/.cache/tilesmith/tracks/<graph-key>/attempts/
+  attempt_00.py
+  attempt_01.py
+  attempt_02.py
+  attempt_03.py
+  attempt_04.py
+```
+
+Every attempt starts with the captured PyTorch FX program as comments, followed
+by the executable Inductor/Triton source. A new turn copies the most recently
+evaluated source. After `attempt_04.py`, the oldest contents are discarded and
+the other attempts shift down. Complete host reports and structured agent
+traces are retained beside the attempts under `profiles/`.
+
+An agent final answer ends only that agent turn. The outer LangGraph does not
+finish a requested loop until the host:
+
+1. compares the candidate with the original Inductor wrapper on normal, zero,
+   and high-magnitude inputs, including output strides;
+2. measures alternating paired CUDA-event samples;
+3. observes at least `TILESMITH_MIN_IMPROVEMENT`, which defaults to `0.02`;
+4. repeats correctness and timing in a fresh confirmation; and
+5. sees the confirmation clear the same speedup threshold.
+
+With the default unlimited model-call budget, the graph keeps returning failed
+measurements to the agent until every requested loop has confirmed parity and a
+speedup. Provider or infrastructure errors warn and preserve the original
+Inductor callable.
+
+## GPU sandboxes
+
+Tilesmith can give the agent an unrestricted shell on the target GPU through
+the bundled ComputeSDK sandbox layer:
 
 ```sh
-export COMPUTESDK_API_KEY=...
-export COMPUTESDK_TEMPLATE=...
 export MODAL_TOKEN_ID=...
 export MODAL_TOKEN_SECRET=...
 ```
@@ -62,89 +118,78 @@ optimized_model = tilesmith.compile(
     model,
     example_inputs=(x,),
     sandbox="computesdk",
-    chip="H100",
+    chip="L4",
 )
-output = optimized_model(x)
 ```
 
-Only benchmarking is remote; the returned callable still runs locally, so its
-CUDA device must match `chip`. `COMPUTESDK_TEMPLATE` must provide that GPU and
-host-compatible PyTorch and Triton versions. Tilesmith keeps one ephemeral
-sandbox warm for the whole graph optimization track, then destroys it.
-Remote optimization currently accepts only local `cuda:0` graphs because a
-one-GPU sandbox exposes its target as `cuda:0`.
-`COMPUTESDK_TRIBUTARY_URL` overrides the gateway and
-`TILESMITH_SANDBOX_TIMEOUT` controls the maximum sandbox lifetime in seconds.
-The pinned gateway protocol currently routes through Modal provider tokens,
-but Tilesmith does not import or configure Modal itself.
+The agent can use `gpu_shell` for arbitrary Python, Triton, CUDA, package
+installation, PTX or SASS inspection, `ncu`, `nsys`, and any other available
+tool. One sandbox stays warm for the complete graph track, including rejected
+attempts and fresh confirmation. The accepted callable still executes in the
+calling process, so its local CUDA device must match `chip`; remote evaluation
+currently supports `cuda:0` graphs.
 
-## Agent graph
+Sandbox ownership is deterministic. Tilesmith awaits sandbox destruction
+before closing the ComputeSDK client and its event loop, on both success and
+exception paths. The end-to-end run below completed with no TileSmith Modal
+container or ComputeSDK bridge process from this checkout left running.
 
-Each uncached Triton graph gets a Deep Agents `CompiledStateGraph` with file
-tools, local bash, context management, a general-purpose subagent, hosted web
-search, and the real `benchmark_candidate(path)` tool. The graph works in five
-persistent rolling files at
-`~/.cache/tilesmith/tracks/<graph-key>/attempts/attempt_00.py` through
-`attempt_04.py`. Each file starts with the current PyTorch FX graph as comments,
-followed by the executable Inductor/Triton wrapper. The next attempt is copied
-from the last one; after `attempt_04.py`, the oldest contents are discarded and
-the remaining four shift down.
+Modal is the default provider. Other ComputeSDK providers can be selected with
+`COMPUTESDK_PROVIDER`, `COMPUTESDK_PROVIDER_PACKAGE`,
+`COMPUTESDK_PROVIDER_FACTORY`, `COMPUTESDK_PROVIDER_VERSION`, and
+`COMPUTESDK_PROVIDER_CONFIG`. `COMPUTESDK_TEMPLATE` selects an image and
+`TILESMITH_SANDBOX_TIMEOUT` bounds the sandbox lifetime.
 
-Bash receives only a minimal environment without API credentials and is
-instructed to work in that graph directory. Deep Agents' `LocalShellBackend` is
-still host shell access, not an operating-system security sandbox; use
-Tilesmith only with models and workloads you trust. Candidate execution remains
-exclusive to the benchmark tool.
+## Verified end-to-end result
 
-The graph chooses its own optimization workflow. The host restricts only the
-expensive boundary: `loops` is the number of benchmark/profile cycles and
-defaults to one. A parent LangGraph advances only after
-`benchmark_candidate(path)` measures one new candidate; duplicate source does
-not consume a loop. Both the parent graph and each Deep Agent round have a
-fixed 70-step safety ceiling. Timing repetitions are intentionally internal,
-not user-configurable. The model context retains the five newest benchmark
-payloads without discarding other tool work.
-
-The tool reads the named attempt, restores its trusted FX comment header, and
-rejects incorrect source before timing. Its inline response contains progress,
-every raw timing sample, operator summaries, allocator statistics, GPU metadata,
-and the exact evaluator chip. Complete Chrome traces, stacks, memory timelines,
-allocator snapshots, and Nsight Compute CSV are retained under the graph's
-`profiles/` directory; the response includes the path so the agent can inspect
-raw details without overflowing model context. The host selects the fastest
-successfully measured candidate regardless of the agent's final text and runs a
-fresh confirmation before installation.
-
-Correctness covers normal, zero, and high-magnitude inputs against the original
-TorchInductor callable. Timing uses 25 warmups, alternating baseline/candidate
-order, and the median of seven paired 100-iteration CUDA-event ratios with all
-raw samples retained. `TILESMITH_MIN_IMPROVEMENT`, default `0.01`, sets the
-required fractional confirmed speedup.
-
-Validated artifacts are cached in `~/.cache/tilesmith`. The key includes the
-generated source, PyTorch/Triton/CUDA and Deep Agents versions, NVIDIA device,
-ComputeSDK configuration and chip, agent settings, and loaded skill contents.
-Repeating the same compile track loads that exact accepted source;
-PyTorch and Triton's normal cache then avoids rebuilding it.
-
-## H100 agent benchmark
-
-After exporting the LLM and ComputeSDK variables above, run the explicit paid
-fixture:
+On August 3, 2026, the public interface was tested with the deterministic BF16
+top-two MoE Transformer in `moe_benchmark.py`:
 
 ```sh
-python3 benchmark.py run --loops 1
+python3 moe_benchmark.py --chip L4 --model openai/gpt-5.3-codex
 ```
 
-It provisions one H100, extracts the included `4096 × 4096` fp16 RMSNorm, and
-creates a correct baseline with four redundant Triton launches. It exits
-nonzero unless the graph is multi-turn, calls the real benchmark tool, removes
-the controlled waste, and freshly confirms at least a 25% speedup. When
-available, the graph also receives the complete local `high-performance-triton`
-and `KernelWiki` skills alongside `check-normal` and `high-performance-cuda`
-guidance. Every paid run uses a fresh persistent track so a prior fixture win
-cannot satisfy a later test.
+The workload used an `8 × 128` token input, width 256, eight attention heads,
+four experts with hidden width 512, and a 2,048-token output vocabulary. The
+test ran on an NVIDIA L4 with CUDA 13.0, driver 580.95.05, PyTorch
+2.13.0+cu130, and Triton 3.7.1.
 
-Ordinary local tests never provision ComputeSDK. Only `benchmark.py run` or an
-uncached `compile(..., sandbox="computesdk", chip=...)` call creates a paid GPU.
-Credential values are never written to the repository or passed to the agent.
+| Execution path | Median latency | Speedup over eager | Speedup over `torch.compile` |
+| --- | ---: | ---: | ---: |
+| Eager PyTorch | 1.041775 ms | 1.000× | — |
+| `torch.compile` | 0.519250 ms | 2.006× | 1.000× |
+| `tilesmith.compile` | **0.488704 ms** | **2.132×** | **1.059×** |
+
+Tilesmith was **5.88% faster than ordinary `torch.compile`** end to end. Each
+number is the median of seven alternating samples with 25 warmups and 100
+CUDA-event-timed invocations per sample. The observed sample ranges were
+1.037865–1.049756 ms for eager PyTorch, 0.509983–0.524361 ms for
+`torch.compile`, and 0.486390–0.492706 ms for Tilesmith.
+
+Both compiled paths had the same maximum absolute error versus eager PyTorch:
+`0.13671875`. The generated-wrapper gate also passed all three correctness
+inputs and independently confirmed a 4.19% improvement, from a normalized
+score of `1.0` to `0.958067`. Before accepting that source, the graph rejected
+three candidates scoring `0.997462`, `0.985625`, and `0.980071`; the last was
+still below the required 2% margin. The successful uncapped track used 91 model
+calls, which also exercises the absence of a hidden 70-call limit.
+
+## Cache and validation
+
+Accepted source is cached under `~/.cache/tilesmith`. Its key includes the
+generated source, Inductor graph identity, PyTorch/Triton/CUDA stack, NVIDIA
+device, model, loop count, optional model-call budget, required improvement,
+sandbox placement, and loaded skill contents. Repeating the same compile loads
+that exact accepted source without rerunning the agent or provisioning another
+sandbox. A changed graph receives a distinct track and starts from its own
+latest source.
+
+Local tests do not provision paid GPUs:
+
+```sh
+python3 -m unittest -v test_tilesmith.py
+```
+
+`moe_benchmark.py` is the public end-to-end GPU test. `benchmark.py run` is the
+smaller controlled agent/sandbox fixture. Both exit nonzero unless correctness
+and the required speedup pass.

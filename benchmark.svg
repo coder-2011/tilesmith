@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title description">
+  <title id="title">Tilesmith MoE benchmark on an NVIDIA L4</title>
+  <desc id="description">Horizontal bar chart. Eager PyTorch takes 1.041775 milliseconds, torch.compile takes 0.519250 milliseconds, and tilesmith.compile takes 0.488704 milliseconds. Lower is better.</desc>
+  <defs>
+    <linearGradient id="baseline" x1="0" x2="1">
+      <stop offset="0" stop-color="#64748b"/>
+      <stop offset="1" stop-color="#a8b3c7"/>
+    </linearGradient>
+    <linearGradient id="optimized" x1="0" x2="1">
+      <stop offset="0" stop-color="#0d9488"/>
+      <stop offset="1" stop-color="#5eead4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="500" rx="24" fill="#0b1020"/>
+  <text x="52" y="60" fill="#f8fafc" font-family="ui-sans-serif, system-ui, sans-serif" font-size="28" font-weight="700">BF16 top-two MoE Transformer · NVIDIA L4</text>
+  <text x="52" y="94" fill="#94a3b8" font-family="ui-sans-serif, system-ui, sans-serif" font-size="17">Public PyTorch interface · median CUDA-event latency · lower is better</text>
+
+  <line x1="330" y1="126" x2="330" y2="386" stroke="#334155" stroke-width="2"/>
+  <line x1="330" y1="386" x2="1110" y2="386" stroke="#334155" stroke-width="2"/>
+  <g stroke="#1e293b" stroke-width="1">
+    <line x1="516" y1="126" x2="516" y2="386"/>
+    <line x1="701" y1="126" x2="701" y2="386"/>
+    <line x1="887" y1="126" x2="887" y2="386"/>
+    <line x1="1073" y1="126" x2="1073" y2="386"/>
+  </g>
+  <g fill="#64748b" font-family="ui-monospace, SFMono-Regular, monospace" font-size="13">
+    <text x="330" y="410" text-anchor="middle">0</text>
+    <text x="516" y="410" text-anchor="middle">0.25</text>
+    <text x="701" y="410" text-anchor="middle">0.50</text>
+    <text x="887" y="410" text-anchor="middle">0.75</text>
+    <text x="1073" y="410" text-anchor="middle">1.00 ms</text>
+  </g>
+
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+    <text x="302" y="174" text-anchor="end" fill="#cbd5e1" font-size="18">Eager PyTorch</text>
+    <rect x="330" y="148" width="774" height="38" rx="8" fill="url(#baseline)"/>
+    <text x="1088" y="174" text-anchor="end" fill="#0b1020" font-size="16" font-weight="700">1.041775 ms</text>
+
+    <text x="302" y="254" text-anchor="end" fill="#cbd5e1" font-size="18">torch.compile</text>
+    <rect x="330" y="228" width="386" height="38" rx="8" fill="url(#baseline)"/>
+    <text x="730" y="254" fill="#cbd5e1" font-size="16" font-weight="700">0.519250 ms</text>
+
+    <text x="302" y="334" text-anchor="end" fill="#f8fafc" font-size="18" font-weight="700">tilesmith.compile</text>
+    <rect x="330" y="308" width="363" height="38" rx="8" fill="url(#optimized)"/>
+    <text x="707" y="334" fill="#5eead4" font-size="16" font-weight="700">0.488704 ms</text>
+  </g>
+
+  <rect x="52" y="442" width="1096" height="1" fill="#1e293b"/>
+  <text x="52" y="474" fill="#5eead4" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="700">5.88% faster than ordinary torch.compile · identical observed max absolute error</text>
+</svg>
