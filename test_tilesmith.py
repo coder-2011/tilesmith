@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import sys
 import tempfile
@@ -5,12 +6,12 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Sequence
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from langchain_core.language_models.fake_chat_models import (
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 
 import tilesmith
 
@@ -36,17 +37,28 @@ class _Evaluator:
     chip = "NVIDIA H100 (sm_90)"
     execution = "a deterministic test evaluator"
 
+    # __init__ records arbitrary GPU shell commands without executing them.
+    def __init__(self):
+        self.shell_commands = []
+
     # evaluate makes numbered and explicitly optimized candidates progressively faster.
     def evaluate(self, source):
         if "broken" in source:
             raise RuntimeError("candidate did not compile")
         if "optimized-2" in source:
-            return {"profiling": {"events": ["kernel-2"]}, "score": 0.4}
+            return {"score": 0.4}
         if "optimized" in source:
-            return {"profiling": {"events": ["kernel-1"]}, "score": 0.5}
+            return {"score": 0.5}
         if source.startswith("candidate-"):
             return {"score": 1 - int(source.split("-")[1]) / 100}
-        return {"profiling": {"events": ["baseline"]}, "score": 1.0}
+        return {"score": 1.0}
+
+    # shell exercises the real agent tool boundary with deterministic output.
+    def shell(self, command, workspace, timeout_seconds):
+        self.shell_commands.append((command, timeout_seconds))
+        return {"exit_code": 0, "stdout": "NVIDIA H100"}
+
+    shell_help = "An unrestricted deterministic H100 shell is available."
 
 
 class TilesmithAgentTests(unittest.TestCase):
@@ -102,11 +114,13 @@ class TilesmithAgentTests(unittest.TestCase):
             {"reference": "torch_inductor_generated", "score": 1.05},
             evaluator,
             2,
+            0.01,
         )
 
         track.start_loop(0)
         baseline = track.benchmark("baseline")
         rejected = track.benchmark("broken")
+        insufficient = track.benchmark("candidate-0")
         measured = track.benchmark("candidate-7")
         measured["caller_only"] = True
         blocked = track.benchmark("candidate-8")
@@ -119,6 +133,8 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(baseline["progress"]["status"], "needs_new_candidate")
         self.assertFalse(rejected["correct"])
         self.assertEqual(rejected["progress"]["status"], "needs_new_candidate")
+        self.assertFalse(insufficient["accepted"])
+        self.assertEqual(insufficient["progress"]["status"], "needs_speedup")
         self.assertAlmostEqual(measured["score"], 0.93)
         self.assertIn("already benchmarked", blocked["error"])
         self.assertTrue(cached["cached"])
@@ -130,6 +146,7 @@ class TilesmithAgentTests(unittest.TestCase):
     # test_optimizer_failure_falls_back keeps optional agent infrastructure out of model semantics.
     def test_optimizer_failure_falls_back(self):
         calls = []
+        owner = Mock()
 
         # baseline records the boxed input that ordinary Inductor receives.
         def baseline(inputs):
@@ -142,7 +159,9 @@ class TilesmithAgentTests(unittest.TestCase):
             {},
             None,
             "graph-key",
+            owner=owner,
         )
+        owner.current_callable = kernel
         with (
             patch.object(kernel, "_install", side_effect=RuntimeError("offline")),
             self.assertWarnsRegex(UserWarning, "using ordinary Inductor"),
@@ -152,57 +171,7 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(result, "baseline")
         self.assertEqual(calls, [["input"]])
         self.assertIs(kernel.installed, baseline)
-
-    # test_history_keeps_five_benchmarks proves unrelated tools do not consume the retention budget.
-    def test_history_keeps_five_benchmarks(self):
-        messages = []
-        for attempt in range(6):
-            benchmark_id = f"benchmark-{attempt}"
-            read_id = f"read-{attempt}"
-            messages.extend(
-                [
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "name": "benchmark_candidate",
-                                "args": {"path": f"/attempts/attempt_{attempt:02d}.py"},
-                                "id": benchmark_id,
-                                "type": "tool_call",
-                            },
-                            {
-                                "name": "read_file",
-                                "args": {"path": "/kernel.py"},
-                                "id": read_id,
-                                "type": "tool_call",
-                            },
-                        ],
-                    ),
-                    ToolMessage(
-                        content=f"report-{attempt}",
-                        name="benchmark_candidate",
-                        tool_call_id=benchmark_id,
-                    ),
-                    ToolMessage(
-                        content="kernel source",
-                        name="read_file",
-                        tool_call_id=read_id,
-                    ),
-                ]
-            )
-
-        tilesmith._BenchmarkHistoryEdit().apply(messages, count_tokens=lambda _: 0)
-
-        benchmark_results = messages[1::3]
-        read_results = messages[2::3]
-        self.assertEqual(
-            [message.content for message in benchmark_results],
-            ["[cleared]", *[f"report-{attempt}" for attempt in range(1, 6)]],
-        )
-        self.assertEqual(messages[0].tool_calls[0]["args"], {})
-        self.assertTrue(
-            all(message.content == "kernel source" for message in read_results)
-        )
+        self.assertIs(owner.current_callable, baseline)
 
     # test_attempt_workspace_rotates_five_files checks source lineage and reference repair together.
     def test_attempt_workspace_rotates_five_files(self):
@@ -236,6 +205,99 @@ class TilesmithAgentTests(unittest.TestCase):
                 )
             )
 
+    # test_gpu_shell_round_trips_candidate protects the local/remote edit boundary.
+    def test_gpu_shell_round_trips_candidate(self):
+        source = tilesmith._with_reference(
+            "def forward(self, x):\n    return x",
+            "def call(args):\n    return args\n",
+        )
+        remote_source = source.replace("return args", "return optimized")
+        worker = Mock()
+        worker.shell.return_value = {"exit_code": 0, "stdout": "profile complete"}
+        worker.read_text.return_value = remote_source
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = tilesmith._AttemptWorkspace(Path(directory), source)
+            workspace.prepare_next()
+            report = tilesmith._run_gpu_shell(worker, workspace, "ncu ...", 600)
+            synced_source = workspace.read_latest()
+
+        worker.write_text.assert_called_once_with("workbench/candidate.py", source)
+        worker.shell.assert_called_once_with("ncu ...", 600)
+        self.assertEqual(synced_source, remote_source)
+        self.assertIn("copied to local attempt", report["candidate_sync"])
+
+    # test_compute_shell_returns_worker_report keeps benchmark evidence inside gpu_shell.
+    def test_compute_shell_returns_worker_report(self):
+        sandbox = object.__new__(tilesmith._ComputeSandbox)
+        sandbox.command_timeout_ms = 60_000
+        command_result = Mock(
+            duration_ms=12.5,
+            exit_code=0,
+            stderr="",
+            stdout='{"result_bytes": 31}\n',
+        )
+        worker_result = '{"correct": true, "score": 0.5}'
+
+        with (
+            patch.object(sandbox, "_command", return_value=command_result),
+            patch.object(
+                sandbox, "read_text", return_value=worker_result
+            ) as read_text,
+        ):
+            report = sandbox.shell("python3 worker.py compare", 30)
+
+        read_text.assert_called_once_with(f"{tilesmith.REMOTE_WORKSPACE}/result.json")
+        self.assertEqual(report["worker_result"], {"correct": True, "score": 0.5})
+
+    # test_compute_sandbox_exit_orders_teardown protects the paid resource boundary.
+    def test_compute_sandbox_exit_orders_teardown(self):
+        events = []
+        sandbox = object.__new__(tilesmith._ComputeSandbox)
+        sandbox.sandbox = object()
+        sandbox.sandbox_scope = type("Scope", (), {})()
+        sandbox.client = type("Client", (), {})()
+        sandbox.sandbox_scope.__aexit__ = Mock(return_value="sandbox-destroyed")
+        sandbox.client.__aexit__ = Mock(return_value="client-closed")
+        sandbox.runner = Mock()
+        sandbox.runner.run.side_effect = lambda operation: events.append(operation) or operation
+        sandbox.runner.close.side_effect = lambda: events.append("runner-closed")
+
+        result = sandbox.__exit__(None, None, None)
+
+        self.assertEqual(result, "sandbox-destroyed")
+        self.assertEqual(events, ["sandbox-destroyed", "client-closed", "runner-closed"])
+
+    # test_compute_bridge_accepts_large_responses protects generated-source and trace reads.
+    def test_compute_bridge_accepts_large_responses(self):
+        from sandboxes.computesdk import _BRIDGE_RESPONSE_LIMIT_BYTES, _Bridge
+
+        # exercise captures the subprocess options without starting npm or a provider.
+        async def exercise():
+            process = Mock()
+            process.returncode = 0
+            process.stdout = asyncio.StreamReader()
+            bridge = _Bridge((), "priority", True, 1.0)
+            with patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ) as create_process:
+                with patch.object(
+                    bridge,
+                    "call",
+                    new=AsyncMock(return_value={"providers": []}),
+                ):
+                    await bridge.start()
+            self.assertEqual(
+                create_process.await_args.kwargs["limit"],
+                _BRIDGE_RESPONSE_LIMIT_BYTES,
+            )
+            process.stdout.feed_eof()
+            await bridge._reader_task
+            bridge._stderr.close()
+
+        asyncio.run(exercise())
+
     # test_real_graph_installs_measured_file proves LangGraph retries an unbenchmarked loop.
     def test_real_graph_installs_measured_source(self):
         _ToolModel.seen_tools.clear()
@@ -243,16 +305,26 @@ class TilesmithAgentTests(unittest.TestCase):
         optimized_2 = 'def call(args):\n    return "optimized-2"\n'
         model = _ToolModel(
             responses=[
-                AIMessage(content="still planning"),
                 AIMessage(
                     content="",
                     tool_calls=[
                         {
                             "name": "execute",
                             "args": {
-                                "command": "bash -lc 'test -f attempts/attempt_01.py'"
+                                "command": "cp /attempts/attempt_01.py execute-copy.py"
                             },
                             "id": "execute-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "gpu_shell",
+                            "args": {"command": "nvidia-smi", "timeout_seconds": 30},
+                            "id": "gpu-shell-1",
                             "type": "tool_call",
                         }
                     ],
@@ -267,17 +339,6 @@ class TilesmithAgentTests(unittest.TestCase):
                                 "content": optimized,
                             },
                             "id": "write-1",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "benchmark_candidate",
-                            "args": {"path": "/attempts/attempt_01.py"},
-                            "id": "benchmark-1",
                             "type": "tool_call",
                         }
                     ],
@@ -297,17 +358,6 @@ class TilesmithAgentTests(unittest.TestCase):
                         }
                     ],
                 ),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "benchmark_candidate",
-                            "args": {"path": "/attempts/attempt_02.py"},
-                            "id": "benchmark-2",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
                 AIMessage(content="done"),
             ]
         )
@@ -315,6 +365,68 @@ class TilesmithAgentTests(unittest.TestCase):
             cache_dir=Path("/tmp"),
             compute=None,
             loops=2,
+            max_model_calls=6,
+            min_improvement=0.01,
+            model="test",
+            skills=(),
+            timeout=10.0,
+        )
+        source = tilesmith._with_reference(
+            "def forward(self, x):\n    return x",
+            "def call(args):\n    return args\n",
+        )
+
+        evaluator = _Evaluator()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(tilesmith, "_chat_model", return_value=model):
+                result = tilesmith._run_agent(
+                    source,
+                    settings,
+                    evaluator,
+                    Path(directory) / "track",
+                )
+            attempts = sorted((Path(directory) / "track" / "attempts").glob("*.py"))
+            reports = sorted((Path(directory) / "track" / "profiles").glob("*.json"))
+            execute_copy_exists = (
+                Path(directory) / "track" / "execute-copy.py"
+            ).is_file()
+
+        self.assertIn(optimized_2, result.source)
+        self.assertEqual(result.benchmarks, 2)
+        self.assertEqual(result.model_calls, 6)
+        self.assertEqual(result.confirmed_score, 0.4)
+        self.assertEqual(evaluator.shell_commands, [("nvidia-smi", 30)])
+        self.assertTrue(execute_copy_exists)
+        self.assertEqual(len(attempts), 5)
+        self.assertEqual(
+            [path.name for path in reports],
+            [
+                "baseline.json",
+                "loop_00.json",
+                "loop_01.json",
+                "trace_00.json",
+                "trace_01.json",
+            ],
+        )
+        self.assertTrue(
+            {
+                "execute",
+                "gpu_shell",
+                "read_exact_source",
+                "web_search",
+                "write_file",
+            }
+            <= _ToolModel.seen_tools
+        )
+
+    # test_model_call_limit_counts_provider_calls protects the public budget invariant.
+    def test_model_call_limit_counts_provider_calls(self):
+        model = _ToolModel(responses=[AIMessage(content="no candidate edit")])
+        settings = tilesmith._Settings(
+            cache_dir=Path("/tmp"),
+            compute=None,
+            loops=1,
+            max_model_calls=1,
             min_improvement=0.01,
             model="test",
             skills=(),
@@ -326,28 +438,16 @@ class TilesmithAgentTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(tilesmith, "_chat_model", return_value=model):
-                result = tilesmith._run_agent(
-                    source,
-                    settings,
-                    _Evaluator(),
-                    Path(directory) / "track",
-                )
-            attempts = sorted((Path(directory) / "track" / "attempts").glob("*.py"))
-            reports = sorted((Path(directory) / "track" / "profiles").glob("*.json"))
+            track = Path(directory) / "track"
+            with (
+                patch.object(tilesmith, "_chat_model", return_value=model),
+                self.assertRaisesRegex(RuntimeError, "max_model_calls=1"),
+            ):
+                tilesmith._run_agent(source, settings, _Evaluator(), track)
+            final_trace = (track / "profiles" / "trace_01.json").read_text()
 
-        self.assertIn(optimized_2, result.source)
-        self.assertEqual(result.benchmarks, 2)
-        self.assertEqual(result.model_calls, 8)
-        self.assertEqual(result.confirmed_score, 0.4)
-        self.assertEqual(len(attempts), 5)
-        self.assertEqual(
-            [path.name for path in reports],
-            ["baseline.json", "loop_00.json", "loop_01.json"],
-        )
-        self.assertTrue(
-            {"execute", "web_search", "write_file"} <= _ToolModel.seen_tools
-        )
+        self.assertIn('"model_call_limit_reached": true', final_trace)
+        self.assertIn('"model_calls": 1', final_trace)
 
 
 if __name__ == "__main__":

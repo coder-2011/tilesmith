@@ -11,6 +11,7 @@ from tilesmith import (
     _default_skills,
     _read_compute_config,
     _read_settings,
+    _run_gpu_shell,
     _run_agent,
     _with_reference,
 )
@@ -37,22 +38,32 @@ def _slow_fixture(source, launches):
 
 
 class _FixtureEvaluator:
-    """Expose the controlled remote workload through the agent's benchmark tool."""
+    """Expose the controlled remote workload and its open GPU workbench."""
 
     # __init__ retains the warm sandbox and its observed chip description.
     def __init__(self, worker):
         self.worker = worker
         self.chip = worker.chip
         self.execution = "one warm ComputeSDK GPU sandbox"
+        self.shell_calls = 0
 
     # evaluate uploads one candidate and runs the controlled correctness and timing path.
     def evaluate(self, source):
         self.worker.write_text("candidate.py", source)
-        report = self.worker.run("evaluate-fixture")
-        report["profiling"]["nsight_compute"] = self.worker.profile(
-            "profile-fixture"
-        )
-        return report
+        return self.worker.run("evaluate-fixture")
+
+    # shell gives the agent open access to the fixture's warm ComputeSDK sandbox.
+    def shell(self, command, workspace, timeout_seconds):
+        self.shell_calls += 1
+        return _run_gpu_shell(self.worker, workspace, command, timeout_seconds)
+
+    shell_help = (
+        "The GPU shell starts in /tmp/tilesmith/workbench. candidate.py, workload.py, "
+        "worker.py, measurement.py, request.json, cache/, and artifacts/ are "
+        "available. `python3 worker.py evaluate-fixture` runs the fixture check "
+        "and timing. `python3 worker.py run-fixture` invokes the candidate once; "
+        "wrap that command with any profiler or measurement tool you need."
+    )
 
 
 # _run creates one ComputeSDK evaluator, builds the controlled baseline, and drives the graph.
@@ -70,6 +81,7 @@ def _run(args):
 
     with _ComputeSandbox(compute) as worker:
         worker.write_text("workload.py", workload_source)
+        worker.seed_workspace("workload.py")
         extracted = worker.run("extract-fixture")
         source = extracted.pop("source")
         source = _with_reference(workload_source, source)
@@ -83,7 +95,7 @@ def _run(args):
 
         evaluator = _FixtureEvaluator(worker)
         settings = replace(
-            _read_settings(None, "", args.loops),
+            _read_settings(None, "", args.loops, args.max_model_calls),
             min_improvement=0.05,
             model=args.model,
             skills=tuple(skills),
@@ -96,6 +108,8 @@ def _run(args):
 
     if result.model_calls < 2:
         raise RuntimeError("agent did not execute a multi-turn graph")
+    if evaluator.shell_calls < 1:
+        raise RuntimeError("agent did not use the GPU shell")
     if result.benchmarks != args.loops:
         raise RuntimeError(
             f"graph completed {result.benchmarks} benchmarks for {args.loops} loops"
@@ -117,6 +131,7 @@ def _run(args):
                 "improvement": gain,
                 "loops": args.loops,
                 "model_calls": result.model_calls,
+                "gpu_shell_calls": evaluator.shell_calls,
                 "skill_files": len(skills),
             },
             sort_keys=True,
@@ -127,7 +142,7 @@ def _run(args):
 # _parse_args keeps the paid ComputeSDK benchmark explicit and configurable.
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Run the opt-in Tilesmith H100 agent benchmark"
+        description="Run the opt-in Tilesmith GPU agent benchmark"
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -135,7 +150,8 @@ def _parse_args():
         "run", help="run the complete Deep Agents benchmark"
     )
     run_parser.add_argument("--loops", type=int, default=1)
-    run_parser.add_argument("--chip", default="H100")
+    run_parser.add_argument("--max-model-calls", type=int)
+    run_parser.add_argument("--chip", default="L4")
     run_parser.add_argument("--expected-improvement", type=float, default=0.25)
     run_parser.add_argument("--launches", type=int, default=4)
     run_parser.add_argument(

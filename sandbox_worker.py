@@ -11,7 +11,6 @@ from measurement import (
     assert_candidate_matches,
     benchmark_pair,
     chip_matches,
-    profile_cuda,
 )
 
 
@@ -236,13 +235,6 @@ def _compare(torch, triton):
             int(request["samples"]),
         )
     )
-    metadata["profiling"] = profile_cuda(
-        torch,
-        candidate,
-        inputs,
-        ROOT,
-        "generated-candidate",
-    )
     metadata["reference"] = "torch_inductor_generated"
     return metadata
 
@@ -267,21 +259,13 @@ def _evaluate_fixture(torch, triton):
     workload = _load_module("tilesmith_workload", ROOT / "workload.py")
     candidate = _load_module("tilesmith_candidate", ROOT / "candidate.py")
     metadata["cases"] = _check(torch, workload, candidate)
-    inputs = workload.make_inputs("cuda")
 
     metadata.update(_benchmark_fixture(torch, workload, candidate, request))
-    metadata["profiling"] = profile_cuda(
-        torch,
-        candidate.call,
-        inputs,
-        ROOT,
-        "fixture-candidate",
-    )
     return metadata
 
 
-# _profile_generated runs one warmed generated candidate for an external Nsight Compute launch.
-def _profile_generated(torch, triton):
+# _run_generated invokes one generated candidate for an agent-selected measurement tool.
+def _run_generated(torch, triton):
     serialized = torch.load(ROOT / "payload.pt", map_location="cpu", weights_only=False)
     constants = _to_cuda(torch, serialized["constants"])
     inputs = _to_cuda(torch, serialized["inputs"])
@@ -289,17 +273,17 @@ def _profile_generated(torch, triton):
     with torch.no_grad():
         candidate(list(inputs))
     torch.cuda.synchronize()
-    return {"profiled": True}
+    return {"ran": True}
 
 
-# _profile_fixture runs one warmed fixture candidate for an external Nsight Compute launch.
-def _profile_fixture(torch, triton):
+# _run_fixture invokes one fixture candidate for an agent-selected measurement tool.
+def _run_fixture(torch, triton):
     workload = _load_module("tilesmith_workload", ROOT / "workload.py")
     candidate = _load_module("tilesmith_candidate", ROOT / "candidate.py")
     with torch.no_grad():
         candidate.call(list(workload.make_inputs("cuda")))
     torch.cuda.synchronize()
-    return {"profiled": True}
+    return {"ran": True}
 
 
 # main dispatches the single requested worker action and emits one JSON report.
@@ -312,8 +296,8 @@ def main():
         "compare": _compare,
         "extract-fixture": _extract_fixture,
         "evaluate-fixture": _evaluate_fixture,
-        "profile-generated": _profile_generated,
-        "profile-fixture": _profile_fixture,
+        "run-generated": _run_generated,
+        "run-fixture": _run_fixture,
     }
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} {'|'.join(actions)}")
