@@ -83,10 +83,11 @@ search. Its system context includes the target GPU, the generated wrapper ABI,
 the host's validation contract, and the installed Triton, CUDA, and kernel
 reference skills.
 
-The graph keeps five rolling source files:
+Each `tilesmith.compile()` call receives a unique run ID. When an eligible graph
+is first invoked, it keeps five rolling source files within that run:
 
 ```text
-~/.cache/tilesmith/tracks/<graph-key>/attempts/
+~/.cache/tilesmith/runs/<run-id>/tracks/<cache-key>/attempts/
   attempt_00.py
   attempt_01.py
   attempt_02.py
@@ -106,7 +107,8 @@ receive their own track instead of being merged into one model-sized file.
 A new turn copies the most recently evaluated source. After `attempt_04.py`,
 the oldest contents are discarded and the other attempts shift down. Complete
 host reports and structured agent traces are retained beside the attempts under
-`profiles/`.
+`profiles/`. An exact artifact-cache hit does not rerun the agent; its fresh
+run track contains `cache.json`, which identifies the reused artifact.
 
 An agent final answer ends only that agent turn. The outer LangGraph does not
 finish a requested loop until the host:
@@ -201,13 +203,16 @@ calls, which also exercises the absence of a hidden 70-call limit.
 
 ## Cache and validation
 
-Accepted source is cached under `~/.cache/tilesmith`. Its key includes the
-generated source, Inductor graph identity, PyTorch/Triton/CUDA stack, NVIDIA
-device, model, agency, loop count, optional model-call budget, required improvement,
-sandbox placement, and loaded skill contents. Repeating the same compile loads
-that exact accepted source without rerunning the agent or provisioning another
-sandbox. A changed graph receives a distinct track and starts from its own
-latest source.
+Accepted source is stored once under
+`~/.cache/tilesmith/artifacts/<cache-key>.py`, with its manifest and lock under
+`manifests/` and `locks/`. Its key includes the generated source, Inductor graph
+identity, PyTorch/Triton/CUDA stack, NVIDIA device, model, agency, loop count,
+optional model-call budget, required improvement, sandbox placement, and loaded
+skill contents. Each eligible graph gets its own evidence directory under
+`runs/<run-id>/tracks/<cache-key>/`, even when it reuses the shared accepted
+source. Repeating the same compile therefore skips the agent and sandbox but
+still leaves a separate cache-hit record; a changed graph starts a new agent
+track in its own run.
 
 Local tests do not provision paid GPUs:
 

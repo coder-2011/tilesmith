@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +102,7 @@ class _Settings:
     max_model_calls: int | None
     min_improvement: float
     model: str
+    run_id: str
     skills: tuple[str, ...]
     timeout: float
 
@@ -208,6 +210,7 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
         max_model_calls=max_model_calls,
         min_improvement=min_improvement,
         model=os.environ.get("TILESMITH_MODEL", "gpt-5.5"),
+        run_id=uuid.uuid4().hex,
         skills=tuple(_default_skills()),
         timeout=timeout,
     )
@@ -475,7 +478,9 @@ class _LazyKernel:
         )
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        with _cache_lock(self.settings.cache_dir / f"{cache_key}.lock"):
+        lock_path = self.settings.cache_dir / "locks" / f"{cache_key}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with _cache_lock(lock_path):
             cached = _read_cache(self.settings.cache_dir, cache_key)
             if cached is None:
                 _wait_for_model(self.settings.model)
@@ -499,12 +504,23 @@ class _LazyKernel:
                             self.source,
                             self.settings,
                             evaluator,
-                            self.settings.cache_dir / "tracks" / cache_key,
+                            _track_directory(
+                                self.settings.cache_dir,
+                                self.settings.run_id,
+                                cache_key,
+                            ),
                         )
                 cached = _write_cache(
                     self.settings.cache_dir,
                     cache_key,
                     result.source,
+                )
+            else:
+                _record_cache_hit(
+                    self.settings.cache_dir,
+                    self.settings.run_id,
+                    cache_key,
+                    cached,
                 )
         if cached.read_text(encoding="utf-8") == self.source:
             return self.baseline
@@ -617,6 +633,37 @@ def _cache_lock(path):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _artifact_paths(cache_dir, cache_key):
+    """Return the shared artifact and manifest locations for one compile identity."""
+
+    return (
+        cache_dir / "artifacts" / f"{cache_key}.py",
+        cache_dir / "manifests" / f"{cache_key}.json",
+    )
+
+
+def _track_directory(cache_dir, run_id, cache_key):
+    """Keep one compile invocation's graph evidence separate from shared artifacts."""
+
+    return cache_dir / "runs" / run_id / "tracks" / cache_key
+
+
+def _record_cache_hit(cache_dir, run_id, cache_key, artifact):
+    """Record that one graph reused an accepted artifact without inventing agent traces."""
+
+    directory = _track_directory(cache_dir, run_id, cache_key)
+    directory.mkdir(parents=True, exist_ok=True)
+    record = {
+        "artifact": str(artifact.relative_to(cache_dir)),
+        "cache_key": cache_key,
+        "status": "cache_hit",
+    }
+    (directory / "cache.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 # _preserve_rng prevents trial executions from consuming randomness meant for the user's first model call.
 @contextlib.contextmanager
 def _preserve_rng():
@@ -633,8 +680,7 @@ def _preserve_rng():
 
 # _read_cache accepts only a manifest whose key and source digest match the artifact on disk.
 def _read_cache(cache_dir, cache_key):
-    artifact = cache_dir / f"{cache_key}.py"
-    manifest = cache_dir / f"{cache_key}.json"
+    artifact, manifest = _artifact_paths(cache_dir, cache_key)
     try:
         metadata = json.loads(manifest.read_text(encoding="utf-8"))
         source = artifact.read_bytes()
@@ -651,8 +697,9 @@ def _read_cache(cache_dir, cache_key):
 # _write_cache syntax-checks the final candidate and atomically publishes source before its manifest.
 def _write_cache(cache_dir, cache_key, source):
     builtins.compile(source, f"tilesmith-cache-{cache_key}.py", "exec")
-    artifact = cache_dir / f"{cache_key}.py"
-    manifest = cache_dir / f"{cache_key}.json"
+    artifact, manifest = _artifact_paths(cache_dir, cache_key)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     source_hash = hashlib.sha256(source.encode()).hexdigest()
     with tempfile.NamedTemporaryFile(
         "w", dir=cache_dir, suffix=".py", delete=False

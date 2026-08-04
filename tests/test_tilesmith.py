@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import sys
 import tempfile
 import unittest
@@ -269,6 +270,27 @@ class TilesmithAgentTests(unittest.TestCase):
                 )
             )
 
+    # test_run_tracks_separate_evidence_from_shared_artifacts covers repeated identical compiles.
+    def test_run_tracks_separate_evidence_from_shared_artifacts(self):
+        source = "def call(args):\n    return args\n"
+        cache_key = "same-graph"
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory)
+            artifact = tilesmith._write_cache(cache_dir, cache_key, source)
+            tilesmith._record_cache_hit(cache_dir, "first", cache_key, artifact)
+            tilesmith._record_cache_hit(cache_dir, "second", cache_key, artifact)
+
+            first = tilesmith._track_directory(cache_dir, "first", cache_key)
+            second = tilesmith._track_directory(cache_dir, "second", cache_key)
+            first_record = json.loads((first / "cache.json").read_text())
+            second_record = json.loads((second / "cache.json").read_text())
+            cached_source = artifact.read_text()
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first_record["status"], "cache_hit")
+        self.assertEqual(second_record["artifact"], "artifacts/same-graph.py")
+        self.assertEqual(cached_source, source)
+
     # test_gpu_shell_round_trips_candidate protects the local/remote edit boundary.
     def test_gpu_shell_round_trips_candidate(self):
         source = tilesmith._with_reference(
@@ -433,6 +455,7 @@ class TilesmithAgentTests(unittest.TestCase):
             max_model_calls=6,
             min_improvement=0.01,
             model="test",
+            run_id="test-run",
             skills=(),
             timeout=10.0,
         )
@@ -495,6 +518,7 @@ class TilesmithAgentTests(unittest.TestCase):
             max_model_calls=1,
             min_improvement=0.01,
             model="test",
+            run_id="test-run",
             skills=(),
             timeout=10.0,
         )
