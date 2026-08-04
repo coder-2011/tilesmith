@@ -55,12 +55,12 @@ Your persistent per-graph workspace is /attempts and contains exactly five rolli
 Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize or execute that reference block; preserve it so you can relate generated kernels to PyTorch operations.
 The user message identifies the current optimization loop and its next attempt file. The file is already copied from the most recently benchmarked source. Edit it instead of starting over. After attempt_04.py, the host discards the oldest contents, shifts the other attempts down, and reuses attempt_04.py.
 Use the graph's planning, file editing, bash, subagent, and web-search capabilities whenever useful; choose your own workflow.
-Use /attempts/attempt_XX.py with both file tools and local bash; the host maps that stable path into the current graph workspace.
+File ownership is strict. You may edit only the active `/attempts/attempt_XX.py`; read `/profiles/` but never edit or delete its reports; and never modify another attempt or the trusted FX reference header. Use `/tmp` for disposable local scratch files.
 Work on one coherent candidate per agent turn. Use targeted shell searches and narrow reads instead of paging through the entire generated wrapper, validate the edit, then return a final response so the host can evaluate it and provide feedback.
 Use read_exact_source for any text that will be copied into an edit or matched by a script. Unlike read_file, it returns the file's exact whitespace without line-number gutters.
 Use web search to resolve concrete Triton, PyTorch, or NVIDIA uncertainties, preferring primary documentation and source.
 Inspect the complete wrapper dataflow before editing. Under medium or high agency, you may replace or fuse external-library and generated-template regions with Triton when the agency policy permits it and measurement supports it. Keep runtime libraries as dependencies rather than copying their implementations into the attempt file.
-When gpu_shell is available, it is an unrestricted shell in the persistent target GPU sandbox. Use it freely for Python, Triton, CUDA tools, package installation, NCU, NSYS, PTX/SASS inspection, timing experiments, and any other investigation that helps. It starts in the GPU workspace, mirrors the current local attempt as candidate.py before each command, and copies changes to candidate.py back to the current attempt afterward. Other remote files persist for this graph.
+When gpu_shell is available, it is an unrestricted shell in the persistent target GPU sandbox. Use it freely for Python, Triton, CUDA tools, package installation, NCU, NSYS, PTX/SASS inspection, timing experiments, and any other investigation that helps. It starts in the GPU workspace, mirrors the current local attempt as candidate.py before each command, and copies changes to candidate.py back to the current attempt afterward. You may edit only `candidate.py`; `baseline.py`, `payload.pt`, `worker.py`, `measurement.py`, `request.json`, `result.json`, `cache/`, and `artifacts/` are host-owned and read-only. Use `/tmp` for disposable remote scratch files. Other remote files persist for this graph.
 After a meaningful edit, use gpu_shell before returning. Run the lightweight candidate invocation named in the GPU workspace instructions so syntax, imports, compilation, and one real invocation succeed. Use the named comparison command or profilers only when their additional evidence is useful.
 When a GPU check or comparison shows a correct, meaningful win, stop editing and return a final response. Do not add a speculative follow-on optimization to the same candidate; the host will independently evaluate and confirm it. A final response ends only this agent turn, never the optimization track.
 The host automatically runs its independent correctness and timing gate on the current attempt when you finish a turn. That host result, not exploratory output, chooses the installed source. If it rejects the candidate, the next turn includes the exact report and continues the same loop.
@@ -511,7 +511,7 @@ class _LazyKernel:
                             self.source,
                             self.settings,
                             evaluator,
-                            _track_directory(
+                            _run_graph_directory(
                                 self.settings.cache_dir,
                                 self.settings.run_id,
                                 cache_key,
@@ -649,16 +649,16 @@ def _artifact_paths(cache_dir, cache_key):
     )
 
 
-def _track_directory(cache_dir, run_id, cache_key):
+def _run_graph_directory(cache_dir, run_id, cache_key):
     """Keep one compile invocation's graph evidence separate from shared artifacts."""
 
-    return cache_dir / "runs" / run_id / "tracks" / cache_key
+    return cache_dir / "runs" / run_id / cache_key
 
 
 def _record_cache_hit(cache_dir, run_id, cache_key, artifact):
     """Record that one graph reused an accepted artifact without inventing agent traces."""
 
-    directory = _track_directory(cache_dir, run_id, cache_key)
+    directory = _run_graph_directory(cache_dir, run_id, cache_key)
     directory.mkdir(parents=True, exist_ok=True)
     record = {
         "artifact": str(artifact.relative_to(cache_dir)),

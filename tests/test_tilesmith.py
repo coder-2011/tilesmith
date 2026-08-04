@@ -280,8 +280,8 @@ class TilesmithAgentTests(unittest.TestCase):
             tilesmith._record_cache_hit(cache_dir, "first", cache_key, artifact)
             tilesmith._record_cache_hit(cache_dir, "second", cache_key, artifact)
 
-            first = tilesmith._track_directory(cache_dir, "first", cache_key)
-            second = tilesmith._track_directory(cache_dir, "second", cache_key)
+            first = tilesmith._run_graph_directory(cache_dir, "first", cache_key)
+            second = tilesmith._run_graph_directory(cache_dir, "second", cache_key)
             first_record = json.loads((first / "cache.json").read_text())
             second_record = json.loads((second / "cache.json").read_text())
             cached_source = artifact.read_text()

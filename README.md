@@ -87,13 +87,17 @@ Each `tilesmith.compile()` call receives a unique run ID. When an eligible graph
 is first invoked, it keeps five rolling source files within that run:
 
 ```text
-~/.cache/tilesmith/runs/<run-id>/tracks/<cache-key>/attempts/
+~/.cache/tilesmith/runs/<run-id>/<cache-key>/attempts/
   attempt_00.py
   attempt_01.py
   attempt_02.py
   attempt_03.py
   attempt_04.py
 ```
+
+`<cache-key>` is the 64-character SHA-256 identity of one generated graph and
+its optimization environment. A single compile run may contain several such
+graphs, such as forward, backward, or graph-break regions.
 
 Every attempt starts with the captured PyTorch FX program as comments, followed
 by one canonical Inductor-generated Python wrapper for that graph. The wrapper
@@ -210,7 +214,7 @@ Accepted source is stored once under
 identity, PyTorch/Triton/CUDA stack, NVIDIA device, model, agency, loop count,
 optional model-call budget, required improvement, sandbox placement, and loaded
 skill contents. Each eligible graph gets its own evidence directory under
-`runs/<run-id>/tracks/<cache-key>/`, even when it reuses the shared accepted
+`runs/<run-id>/<cache-key>/`, even when it reuses the shared accepted
 source. Repeating the same compile therefore skips the agent and sandbox but
 still leaves a separate cache-hit record; a changed graph starts a new agent
 track in its own run.
