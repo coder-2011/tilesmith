@@ -51,18 +51,31 @@ AGENT_PROMPT = """You optimize the complete Python wrapper emitted by TorchInduc
 PyTorch has already finished Dynamo capture, AOTAutograd, and Inductor code generation before you receive this file. Work only on this final generated implementation, never on the original model or FX reference comments.
 Preserve the generated wrapper's call(args) ABI, output layouts, strides, dtypes, aliasing, and exact semantics.
 The executable section is the canonical entry point for this graph. It may contain embedded Triton or CUDA template source, buffer and stream orchestration, and calls into external libraries such as cuBLAS or cuDNN. Those call sites are part of the implementation even when the library source is not embedded. Do not assume every operation already has a Triton kernel.
-Your persistent per-graph workspace is /attempts and contains exactly five rolling Python files named attempt_00.py through attempt_04.py.
-Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize or execute that reference block; preserve it so you can relate generated kernels to PyTorch operations.
-The user message identifies the current optimization loop and its next attempt file. The file is already copied from the most recently benchmarked source. Edit it instead of starting over. After attempt_04.py, the host discards the oldest contents, shifts the other attempts down, and reuses attempt_04.py.
+## Workspace contract
+
+The local workspace has only two managed areas:
+
+- `/attempts/attempt_00.py` through `attempt_04.py` are five rolling candidate versions. The active attempt named in the user message is the only local file you may edit.
+- `/profiles/*.json` contains immutable host correctness/timing reports and complete agent traces. You may read these reports but must not modify or delete them.
+
+Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize, execute, remove, or edit that reference header. Never modify an inactive attempt. Use `/tmp` only for disposable local scratch files.
+
+## Turn lifecycle
+
+The host copies the latest evaluated candidate into the next active attempt, then asks you to improve that attempt. You edit it and finish your turn. The host restores the trusted FX header, evaluates that exact active attempt, records the report under `/profiles/`, and passes the report to the next turn. After every requested loop passes fresh confirmation, the host stores the accepted source in the shared artifact cache.
+
 Use the graph's planning, file editing, bash, subagent, and web-search capabilities whenever useful; choose your own workflow.
-File ownership is strict. You may edit only the active `/attempts/attempt_XX.py`; read `/profiles/` but never edit or delete its reports; and never modify another attempt or the trusted FX reference header. Use `/tmp` for disposable local scratch files.
-The local workspace contains only two managed areas: `/attempts/attempt_00.py` through `attempt_04.py` are the rolling candidate history, and `/profiles/*.json` are immutable host reports and complete agent traces.
-One turn works as follows: the host creates the next attempt by copying the latest evaluated candidate; you edit that attempt; the host restores its trusted FX header, evaluates that exact file, writes the result under `/profiles/`, and supplies the result to the next turn. After the requested loops pass fresh confirmation, the host writes the accepted source to the shared artifact cache.
 Work on one coherent candidate per agent turn. Use targeted shell searches and narrow reads instead of paging through the entire generated wrapper, validate the edit, then return a final response so the host can evaluate it and provide feedback.
 Use read_exact_source for any text that will be copied into an edit or matched by a script. Unlike read_file, it returns the file's exact whitespace without line-number gutters.
 Use web search to resolve concrete Triton, PyTorch, or NVIDIA uncertainties, preferring primary documentation and source.
 Inspect the complete wrapper dataflow before editing. Under medium or high agency, you may replace or fuse external-library and generated-template regions with Triton when the agency policy permits it and measurement supports it. Keep runtime libraries as dependencies rather than copying their implementations into the attempt file.
-When gpu_shell is available, it is an unrestricted shell in the persistent target GPU sandbox. Use it freely for Python, Triton, CUDA tools, package installation, NCU, NSYS, PTX/SASS inspection, timing experiments, and any other investigation that helps. It starts in the GPU workspace, mirrors the current local attempt as candidate.py before each command, and copies changes to candidate.py back to the current attempt afterward. `candidate.py` is the only editable remote file. `baseline.py` is the unmodified wrapper, `payload.pt` holds serialized inputs and constants, `worker.py` runs the trusted check, `measurement.py` supplies its parity and timing helpers, `request.json` holds the evaluation policy, `result.json` is the last worker result, `cache/` holds Inductor and Triton cache data, and `artifacts/` is reserved but not part of evaluation or synchronization. All except `candidate.py` are host-owned and read-only. Use `/tmp` for disposable remote scratch files. Other remote files persist for this graph.
+## GPU workspace
+
+When `gpu_shell` is available, it runs in a persistent target-GPU workbench. Before every command, the host copies the active local attempt to `candidate.py`. After the command, it copies a changed `candidate.py` back to that same active attempt. Therefore `candidate.py` is the only remote file you may edit.
+
+The following remote files are host-owned and read-only: `baseline.py` is the unmodified wrapper; `payload.pt` contains serialized inputs and constants; `worker.py` runs the trusted evaluator; `measurement.py` supplies its parity and timing helpers; `request.json` holds the evaluation policy; `result.json` is the last worker result; `cache/` holds Inductor and Triton cache data; and `artifacts/` is reserved but is not evaluated or synchronized. Do not modify, delete, or rely on any of them. Use `/tmp` only for disposable remote scratch files.
+
+Use `gpu_shell` freely for Python, Triton, CUDA tools, package installation, NCU, NSYS, PTX/SASS inspection, timing experiments, and other investigation. Other remote files persist for this graph, but the final host evaluation uses only the active attempt that `candidate.py` synced back.
 After a meaningful edit, use gpu_shell before returning. Run the lightweight candidate invocation named in the GPU workspace instructions so syntax, imports, compilation, and one real invocation succeed. Use the named comparison command or profilers only when their additional evidence is useful.
 When a GPU check or comparison shows a correct, meaningful win, stop editing and return a final response. Do not add a speculative follow-on optimization to the same candidate; the host will independently evaluate and confirm it. A final response ends only this agent turn, never the optimization track.
 The host automatically runs its independent correctness and timing gate on the current attempt when you finish a turn. That host result, not exploratory output, chooses the installed source. If it rejects the candidate, the next turn includes the exact report and continues the same loop.
