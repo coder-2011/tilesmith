@@ -46,26 +46,25 @@ def _agent_environment(model):
 # _skill_files maps the local optimization guidance into Tilesmith's remote lookup paths.
 def _skill_files():
     """Return available trusted skill files and their expected remote paths."""
+    from tilesmith import _default_skills
+
     home = Path.home()
-    cuda = home / ".codex" / "skills" / "high-performance-cuda"
-    files = {
-        home / ".codex" / "skills" / "check-normal" / "SKILL.md": "/root/.codex/skills/check-normal/SKILL.md",
-        home / ".codex" / "skills" / "high-performance-triton" / "SKILL.md": "/root/.codex/skills/high-performance-triton/SKILL.md",
-        cuda / "SKILL.md": "/root/.codex/skills/high-performance-cuda/SKILL.md",
-        cuda / "references" / "core-principles.md": "/root/.codex/skills/high-performance-cuda/references/core-principles.md",
-        cuda / "references" / "autotuning-and-benchmarking.md": "/root/.codex/skills/high-performance-cuda/references/autotuning-and-benchmarking.md",
-        cuda / "references" / "numerical-correctness.md": "/root/.codex/skills/high-performance-cuda/references/numerical-correctness.md",
-        cuda / "references" / "triton-and-codegen.md": "/root/.codex/skills/high-performance-cuda/references/triton-and-codegen.md",
-        home / "Documents" / "kernel-design-agents" / "skills" / "KernelWiki" / "SKILL.md": "/root/Documents/kernel-design-agents/skills/KernelWiki/SKILL.md",
-    }
-    return {source: destination for source, destination in files.items() if source.is_file()}
+    remote_home = Path("/root")
+    files = {}
+    for configured in _default_skills():
+        source = Path(configured)
+        relative = source.relative_to(home)
+        destination = remote_home / relative
+        files[source] = str(destination)
+    return files
 
 
 # _upload_runtime transfers only the files the remote public API actually imports.
 async def _upload_runtime(sandbox):
     """Upload Tilesmith, the benchmark, and trusted agent context."""
+    skill_files = _skill_files()
     directories = {
-        str(Path(destination).parent) for destination in _skill_files().values()
+        str(Path(destination).parent) for destination in skill_files.values()
     }
     directories.add(REMOTE_ROOT)
     directories.add(f"{REMOTE_ROOT}/tilesmith/sandboxes")
@@ -96,7 +95,7 @@ async def _upload_runtime(sandbox):
         ),
     ):
         await sandbox.write_file(destination, source.read_text(encoding="utf-8"))
-    for source, destination in _skill_files().items():
+    for source, destination in skill_files.items():
         await sandbox.write_file(destination, source.read_text(encoding="utf-8"))
 
 
@@ -152,7 +151,7 @@ async def _run_remote(model, chip):
     """Provision one requested GPU, run the worker, and always tear it down."""
     from tilesmith.measurement import chip_matches
     from tilesmith.sandboxes.computesdk import ComputeSDKClient, ProviderSpec
-    from tilesmith import SANDBOX_READY_TIMEOUT_MS, _read_compute_config
+    from tilesmith import _read_compute_config
 
     config = _read_compute_config(chip)
     agent_environment = _agent_environment(model)
@@ -169,10 +168,7 @@ async def _run_remote(model, chip):
     if config.template is not None:
         options["templateId"] = config.template
     async with ComputeSDKClient([provider]) as client:
-        readiness_timeout = min(
-            SANDBOX_READY_TIMEOUT_MS,
-            (config.sandbox_timeout - 60) * 1_000,
-        )
+        readiness_timeout = config.readiness_timeout_ms
         async with client.ephemeral_sandbox(
             options,
             provider=config.provider,

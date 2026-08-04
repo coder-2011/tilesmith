@@ -106,9 +106,10 @@ receive their own track instead of being merged into one model-sized file.
 
 A new turn copies the most recently evaluated source. After `attempt_04.py`,
 the oldest contents are discarded and the other attempts shift down. Complete
-host reports and structured agent traces are retained beside the attempts under
-`profiles/`. An exact artifact-cache hit does not rerun the agent; its fresh
-run track contains `cache.json`, which identifies the reused artifact.
+host reports and per-turn structured agent traces are retained beside the
+attempts under `profiles/`. An exact artifact-cache hit does not rerun the
+agent; its fresh run track contains `cache.json`, which identifies the reused
+artifact.
 
 An agent final answer ends only that agent turn. The outer LangGraph does not
 finish a requested loop until the host:
@@ -217,7 +218,7 @@ track in its own run.
 Local tests do not provision paid GPUs:
 
 ```sh
-python3 -m unittest -v test_tilesmith.py
+python3 -m unittest discover -s tests -v
 ```
 
 `moe_benchmark.py` is the public end-to-end GPU test. `benchmark.py run` is the

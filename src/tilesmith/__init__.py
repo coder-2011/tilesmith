@@ -92,6 +92,14 @@ class _ComputeConfig:
     sandbox_timeout: int
     template: str | None
 
+    @property
+    def readiness_timeout_ms(self):
+        """Bound placement waiting below the acquired sandbox lifetime."""
+        return min(
+            SANDBOX_READY_TIMEOUT_MS,
+            (self.sandbox_timeout - 60) * 1_000,
+        )
+
 
 @dataclass(frozen=True)
 class _Settings:
@@ -122,8 +130,7 @@ class _LoopState(TypedDict):
     """Carry deterministic loop progress around the outer LangGraph."""
 
     completed: int
-    messages: list
-    model_calls: int
+    message_count: int
     report: str
     turn: int
 
@@ -823,10 +830,7 @@ class _ComputeSandbox:
         self.sandbox_scope = None
         self.chip = config.chip
         # Placement waiting is bounded independently from the acquired sandbox lifetime.
-        self.readiness_timeout_ms = min(
-            SANDBOX_READY_TIMEOUT_MS,
-            (config.sandbox_timeout - 60) * 1_000,
-        )
+        self.readiness_timeout_ms = config.readiness_timeout_ms
         self.command_timeout_ms = min(
             REMOTE_COMMAND_TIMEOUT_MS,
             self.readiness_timeout_ms,
@@ -1767,7 +1771,8 @@ def _run_agent(source, settings, evaluator, workspace_dir):
             "recursion_limit": sys.maxsize,
         }
         result = {"messages": []}
-        seen_messages = len(state["messages"])
+        message_cursor = state["message_count"]
+        seen_messages = message_cursor
         limit_error = None
         try:
             for result in agent.stream(
@@ -1810,10 +1815,12 @@ def _run_agent(source, settings, evaluator, workspace_dir):
             )
         messages = result.get("messages", [])
         call_count = call_counter.count
+        # Each trace owns one turn; cumulative files would duplicate history
+        # quadratically.
         workspace.write_report(
             f"trace_{state['turn']:02d}",
             {
-                "messages": messages_to_dict(messages),
+                "messages": messages_to_dict(messages[message_cursor:]),
                 "model_call_limit_reached": limit_error is not None,
                 "model_calls": call_count,
             },
@@ -1840,8 +1847,7 @@ def _run_agent(source, settings, evaluator, workspace_dir):
             ) from limit_error
         return {
             "completed": completed,
-            "messages": result.get("messages", []),
-            "model_calls": call_count,
+            "message_count": len(messages),
             "report": encoded_report,
             "turn": state["turn"] + 1,
         }
@@ -1856,11 +1862,10 @@ def _run_agent(source, settings, evaluator, workspace_dir):
     loop_builder.add_conditional_edges("optimize", continue_loops)
     loop_graph = loop_builder.compile()
     try:
-        result = loop_graph.invoke(
+        loop_graph.invoke(
             {
                 "completed": 0,
-                "messages": [],
-                "model_calls": 0,
+                "message_count": 0,
                 "report": "",
                 "turn": 0,
             },
@@ -1868,7 +1873,7 @@ def _run_agent(source, settings, evaluator, workspace_dir):
         )
     finally:
         workspace.normalize_all()
-    model_calls = result["model_calls"]
+    model_calls = call_counter.count
     print(f"graph: {model_calls} model calls, {track.benchmarks} benchmarks")
 
     if track.best_source == source:

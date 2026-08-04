@@ -474,7 +474,10 @@ class TilesmithAgentTests(unittest.TestCase):
                     Path(directory) / "track",
                 )
             attempts = sorted((Path(directory) / "track" / "attempts").glob("*.py"))
-            reports = sorted((Path(directory) / "track" / "profiles").glob("*.json"))
+            profiles = Path(directory) / "track" / "profiles"
+            reports = sorted(profiles.glob("*.json"))
+            first_trace = (profiles / "trace_00.json").read_text()
+            second_trace = (profiles / "trace_01.json").read_text()
             execute_copy_exists = (
                 Path(directory) / "track" / "execute-copy.py"
             ).is_file()
@@ -485,6 +488,9 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(result.confirmed_score, 0.4)
         self.assertEqual(evaluator.shell_commands, [("nvidia-smi", 30)])
         self.assertTrue(execute_copy_exists)
+        self.assertIn("execute-1", first_trace)
+        self.assertNotIn("execute-1", second_trace)
+        self.assertIn("write-2", second_trace)
         self.assertEqual(len(attempts), 5)
         self.assertEqual(
             [path.name for path in reports],
