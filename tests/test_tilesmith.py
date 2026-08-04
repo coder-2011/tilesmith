@@ -164,6 +164,8 @@ class TilesmithAgentTests(unittest.TestCase):
 
         self.assertIn("Keep the existing wrapper", low_prompt)
         self.assertIn("Do not fuse, split, add, or remove kernels", low_prompt)
+        self.assertIn("One turn works as follows", low_prompt)
+        self.assertIn("candidate.py` is the only editable remote file", low_prompt)
         self.assertIn("kernel fusion or decomposition", medium_prompt)
         self.assertIn("Preserve the high-level algorithm", medium_prompt)
         self.assertIn("fuse, split, add, or remove kernels", high_prompt)
