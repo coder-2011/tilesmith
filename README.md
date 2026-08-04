@@ -24,7 +24,7 @@ Start with an environment that already has a matching CUDA build of PyTorch and
 Triton, then install Tilesmith and its agent runtime:
 
 ```sh
-python3 -m pip install -e .
+python3 -m pip install tilesmith-ai
 export OPENAI_API_KEY=...
 export TILESMITH_MODEL=gpt-5.5
 ```
