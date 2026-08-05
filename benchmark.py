@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import time
 from dataclasses import replace
@@ -9,10 +10,12 @@ from pathlib import Path
 from tilesmith import (
     _ComputeSandbox,
     _default_skills,
+    _load_skills,
     _read_compute_config,
     _read_settings,
     _run_gpu_shell,
     _run_agent,
+    _wait_for_model,
     _with_reference,
 )
 
@@ -70,14 +73,25 @@ class _FixtureEvaluator:
 def _run(args):
     if args.launches < 2:
         raise ValueError("--launches must be at least 2")
-    if args.expected_improvement < 0 or args.expected_improvement >= 1:
+    if (
+        not math.isfinite(args.expected_improvement)
+        or not 0 <= args.expected_improvement < 1
+    ):
         raise ValueError("--expected-improvement must be in [0, 1)")
     if not args.chip.strip():
         raise ValueError("--chip must not be empty")
 
     workload_source = (ROOT / "workload.py").read_text(encoding="utf-8")
-    skills = args.skill if args.skill is not None else _default_skills()
+    skill_paths = args.skill if args.skill is not None else _default_skills()
     compute = _read_compute_config(args.chip)
+    settings = replace(
+        _read_settings(None, "", args.loops, args.max_model_calls),
+        min_improvement=0.05,
+        model=args.model,
+        skills=tuple(skill_paths),
+    )
+    skills = _load_skills(settings.skills)
+    _wait_for_model(settings.model)
 
     with _ComputeSandbox(compute) as worker:
         worker.write_text("workload.py", workload_source)
@@ -94,17 +108,11 @@ def _run(args):
         )
 
         evaluator = _FixtureEvaluator(worker)
-        settings = replace(
-            _read_settings(None, "", args.loops, args.max_model_calls),
-            min_improvement=0.05,
-            model=args.model,
-            skills=tuple(skills),
-        )
         track_id = hashlib.sha256(baseline_source.encode()).hexdigest()
         # Paid smoke tests must prove a new agent run instead of inheriting an old fix.
         run_id = f"benchmark-{track_id}-{time.time_ns()}"
         workspace = settings.cache_dir / "tracks" / run_id
-        result = _run_agent(baseline_source, settings, evaluator, workspace)
+        result = _run_agent(baseline_source, settings, evaluator, workspace, skills)
 
     if result.model_calls < 2:
         raise RuntimeError("agent did not execute a multi-turn graph")

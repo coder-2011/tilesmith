@@ -216,9 +216,9 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
         raise ValueError("max_model_calls must be None or a positive integer")
     if not isinstance(agency, str) or agency not in AGENCY_PROMPTS:
         raise ValueError("agency must be 'low', 'medium', or 'high'")
-    if min_improvement < 0 or min_improvement >= 1:
+    if not math.isfinite(min_improvement) or not 0 <= min_improvement < 1:
         raise ValueError("TILESMITH_MIN_IMPROVEMENT must be in [0, 1)")
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("TILESMITH_TIMEOUT must be a positive number of seconds")
 
     cache_default = Path.home() / ".cache" / "tilesmith"
@@ -492,11 +492,13 @@ class _LazyKernel:
                     f"sandbox chip {self.settings.compute.chip!r} does not match "
                     f"execution device {device_name!r}"
                 )
+        skills = _load_skills(self.settings.skills)
         cache_key = _cache_key(
             self.source,
             self.settings,
             device,
             self.graph_key,
+            skills,
         )
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -513,7 +515,7 @@ class _LazyKernel:
                             self.source, self.constants, inputs, self.settings
                         )
                     else:
-                        evaluator_scope = contextlib.nullcontext(
+                        evaluator_scope = contextlib.closing(
                             _Evaluator(
                                 self.baseline,
                                 self.constants,
@@ -531,6 +533,7 @@ class _LazyKernel:
                                 self.settings.run_id,
                                 cache_key,
                             ),
+                            skills,
                         )
                 cached = _write_cache(
                     self.settings.cache_dir,
@@ -594,7 +597,7 @@ def _package_version(name):
 
 
 # _cache_key binds an accepted source file to its graph, agent policy, software, and NVIDIA target.
-def _cache_key(source, settings, device, graph_key):
+def _cache_key(source, settings, device, graph_key, skills):
     import torch
     import triton
 
@@ -617,6 +620,7 @@ def _cache_key(source, settings, device, graph_key):
             {
                 "chip": settings.compute.chip,
                 "provider": settings.compute.provider,
+                "provider_factory": settings.compute.provider_factory,
                 "provider_package": settings.compute.provider_package,
                 "provider_version": settings.compute.provider_version,
                 "template": settings.compute.template,
@@ -636,11 +640,13 @@ def _cache_key(source, settings, device, graph_key):
         ROOT / "sandboxes" / "_computesdk_bridge.cjs",
         ROOT / "measurement.py",
         ROOT / "sandbox_worker.py",
-        *map(Path, settings.skills),
     ]:
         if path.is_file():
             digest.update(str(path).encode())
             digest.update(path.read_bytes())
+    for path, contents in skills:
+        digest.update(str(path).encode())
+        digest.update(contents.encode())
     return digest.hexdigest()
 
 
@@ -830,6 +836,11 @@ class _Evaluator:
             "reference": "torch_inductor_generated",
             "score": 1.0,
         }
+
+    # close removes generated candidate modules as soon as this optimization ends.
+    def close(self):
+        """Release the temporary directory owned by this local evaluator."""
+        self.directory.cleanup()
 
 
 class _ComputeSandbox:
@@ -1250,7 +1261,7 @@ class _AttemptWorkspace:
         latest_index = self.paths.index(self.latest)
         if latest_index == ATTEMPT_FILES - 1:
             contents = [path.read_text(encoding="utf-8") for path in self.paths[1:]]
-            for path, content in zip(self.paths[:-1], contents):
+            for path, content in zip(self.paths[:-1], contents, strict=True):
                 path.write_text(self._annotate(content), encoding="utf-8")
             next_path = self.paths[-1]
         else:
@@ -1259,7 +1270,7 @@ class _AttemptWorkspace:
         self.latest = next_path
         return self._virtual(next_path)
 
-    # read_candidate validates the managed path and restores the immutable reference header.
+    # read_candidate repairs one managed source without changing its recency or active cursor.
     def read_candidate(self, path):
         normalized = f"/{path.lstrip('/')}"
         allowed = {self._virtual(candidate): candidate for candidate in self.paths}
@@ -1267,14 +1278,12 @@ class _AttemptWorkspace:
             names = ", ".join(allowed)
             raise ValueError(f"path must be one of: {names}")
         candidate = allowed[normalized]
+        stat = candidate.stat()
         original = candidate.read_text(encoding="utf-8")
         source = self._annotate(original)
-        if source is original:
-            # Preserve the restart cursor without rewriting a potentially large source file.
-            candidate.touch()
-        else:
+        if source != original:
             candidate.write_text(source, encoding="utf-8")
-        self.latest = candidate
+            os.utime(candidate, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         return normalized, source
 
     # read_latest returns the normalized source currently shared with the GPU shell.
@@ -1510,8 +1519,27 @@ class _BenchmarkTrack:
             )
 
 
+# _load_skills snapshots validated context so cache identity and the agent prompt share bytes.
+def _load_skills(configured_paths):
+    """Read every trusted skill once and enforce the aggregate context limit."""
+    loaded = []
+    total = 0
+    for configured_path in configured_paths:
+        path = Path(configured_path).expanduser().resolve()
+        if path.is_dir():
+            path = path / "SKILL.md"
+        if not path.is_file():
+            raise ValueError(f"agent skill is not a regular file: {path}")
+        contents = path.read_text(encoding="utf-8")
+        total += len(contents.encode())
+        if total > MAX_SKILL_BYTES:
+            raise ValueError(f"agent skill context exceeds {MAX_SKILL_BYTES} bytes")
+        loaded.append((path, contents))
+    return tuple(loaded)
+
+
 # _agent_instructions joins trusted guidance with the evaluator's actual GPU placement.
-def _agent_instructions(settings, evaluator):
+def _agent_instructions(settings, evaluator, skills):
     model_budget = (
         "unlimited model calls"
         if settings.max_model_calls is None
@@ -1538,17 +1566,7 @@ def _agent_instructions(settings, evaluator):
     shell_help = getattr(evaluator, "shell_help", None)
     if shell_help:
         sections.append(f"GPU workspace:\n{shell_help}")
-    total = 0
-    for configured_path in settings.skills:
-        path = Path(configured_path).expanduser().resolve()
-        if path.is_dir():
-            path = path / "SKILL.md"
-        if not path.is_file():
-            raise ValueError(f"agent skill is not a regular file: {path}")
-        contents = path.read_text(encoding="utf-8")
-        total += len(contents.encode())
-        if total > MAX_SKILL_BYTES:
-            raise ValueError(f"agent skill context exceeds {MAX_SKILL_BYTES} bytes")
+    for path, contents in skills:
         sections.append(
             f"--- TRUSTED SKILL START: {path} ---\n"
             f"{contents}\n"
@@ -1579,32 +1597,32 @@ def _wait_for_model(model, timeout_seconds=60):
     from openai import AuthenticationError, OpenAI
 
     api_key, base_url = _model_connection()
-    client = OpenAI(
+    with OpenAI(
         api_key=api_key,
         base_url=base_url or None,
         max_retries=0,
         timeout=10,
-    )
-    deadline = time.monotonic() + timeout_seconds
-    last_error = None
-    while True:
-        try:
-            available = {entry.id for entry in client.models.list().data}
-        except AuthenticationError:
-            raise
-        except Exception as error:
-            last_error = error
-        else:
-            if model in available:
-                return
-            last_error = RuntimeError(f"model {model!r} is not listed")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise RuntimeError(
-                f"model {model!r} did not become ready within {timeout_seconds:g} "
-                f"seconds: {_summarize(last_error)}"
-            ) from last_error
-        time.sleep(min(2, remaining))
+    ) as client:
+        deadline = time.monotonic() + timeout_seconds
+        last_error = None
+        while True:
+            try:
+                available = {entry.id for entry in client.models.list().data}
+            except AuthenticationError:
+                raise
+            except Exception as error:
+                last_error = error
+            else:
+                if model in available:
+                    return
+                last_error = RuntimeError(f"model {model!r} is not listed")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"model {model!r} did not become ready within {timeout_seconds:g} "
+                    f"seconds: {_summarize(last_error)}"
+                ) from last_error
+            time.sleep(min(2, remaining))
 
 
 # _chat_model builds the OpenAI-compatible model used by the Deep Agents graph.
@@ -1630,7 +1648,7 @@ def _chat_model(settings):
 
 
 # _run_agent executes one permissive Deep Agents graph and installs only a freshly confirmed win.
-def _run_agent(source, settings, evaluator, workspace_dir):
+def _run_agent(source, settings, evaluator, workspace_dir, skills):
     baseline_factory = getattr(evaluator, "baseline_report", None)
     baseline_report = (
         baseline_factory()
@@ -1751,7 +1769,7 @@ def _run_agent(source, settings, evaluator, workspace_dir):
     agent = create_deep_agent(
         model=chat_model,
         tools=agent_tools,
-        system_prompt=_agent_instructions(settings, evaluator),
+        system_prompt=_agent_instructions(settings, evaluator, skills),
         middleware=middleware,
         checkpointer=MemorySaver(),
         backend=backend,

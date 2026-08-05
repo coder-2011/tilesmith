@@ -83,6 +83,12 @@ search. Its system context includes the target GPU, the generated wrapper ABI,
 the host's validation contract, and the installed Triton, CUDA, and kernel
 reference skills.
 
+The local bash tool is intentionally unrestricted and runs with the calling
+user's filesystem permissions. Tilesmith withholds the parent environment from
+that shell, but it is not an OS sandbox; use the agent workflow only with a
+trusted model and workspace. ComputeSDK isolates the optional GPU shell in the
+provider sandbox, not the local Deep Agent process.
+
 Each `tilesmith.compile()` call receives a unique run ID. When an eligible graph
 is first invoked, it keeps five rolling source files within that run:
 

@@ -87,7 +87,7 @@ def benchmark_pair(
     ratios = [
         candidate_ms / reference_ms
         for reference_ms, candidate_ms in zip(
-            samples[reference_name], samples["candidate_triton"]
+            samples[reference_name], samples["candidate_triton"], strict=True
         )
     ]
     return {

@@ -209,7 +209,7 @@ def _worker():
 
     import torch
     from torch import nn
-    from torch.nn import functional as functional
+    from torch.nn import functional
 
     import tilesmith
 

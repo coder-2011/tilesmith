@@ -197,6 +197,9 @@ class _Bridge:
         on_stderr: StreamCallback | None = None,
     ) -> object:
         """Send one request and await its matching response."""
+        request_timeout = self._request_timeout if timeout is None else timeout
+        if not math.isfinite(request_timeout) or request_timeout <= 0:
+            raise ValueError("ComputeSDK request timeout must be finite and positive")
         process = self._process
         if process is None or process.stdin is None or process.returncode is not None:
             message = self._process_failure("ComputeSDK bridge is not running")
@@ -219,7 +222,7 @@ class _Bridge:
             async with self._write_lock:
                 process.stdin.write(encoded)
                 await process.stdin.drain()
-            async with asyncio.timeout(timeout or self._request_timeout):
+            async with asyncio.timeout(request_timeout):
                 return await pending.future
         except TimeoutError as error:
             if cancellable:
@@ -366,8 +369,8 @@ class ComputeSDKClient:
             raise ValueError("At least one ComputeSDK provider is required")
         if provider_strategy not in {"priority", "round-robin"}:
             raise ValueError(f"Invalid ComputeSDK provider strategy: {provider_strategy!r}")
-        if request_timeout <= 0:
-            raise ValueError("ComputeSDK request_timeout must be greater than zero")
+        if not math.isfinite(request_timeout) or request_timeout <= 0:
+            raise ValueError("ComputeSDK request_timeout must be finite and positive")
         self._bridge = _Bridge(providers, provider_strategy, fallback_on_error, request_timeout)
         self._start_lock = asyncio.Lock()
         self._provider_names: tuple[str, ...] | None = None
@@ -384,7 +387,7 @@ class ComputeSDKClient:
             await self.close()
         except BaseException as cleanup_error:
             if error is not None:
-                raise BaseExceptionGroup(  # noqa: F821
+                raise BaseExceptionGroup(
                     "ComputeSDK operation and client cleanup both failed",
                     [error, cleanup_error],
                 ) from None
@@ -541,7 +544,7 @@ class ComputeSDKClient:
             try:
                 await sandbox.destroy()
             except BaseException as cleanup_error:
-                grouped = BaseExceptionGroup(  # noqa: F821
+                grouped = BaseExceptionGroup(
                     "Sandbox operation and cleanup both failed",
                     [operation_error, cleanup_error],
                 )
@@ -620,6 +623,8 @@ class Sandbox:
 
     async def wait_until_ready(self, timeout_ms: int) -> None:
         """Wait until the sandbox can execute a real command, not merely report running."""
+        if timeout_ms <= 0:
+            raise ValueError("timeout_ms must be greater than zero")
         try:
             await self._bridge.call(
                 "sandboxWaitUntilReady",
@@ -715,7 +720,12 @@ class Sandbox:
 def _json_bytes(value: object) -> bytes:
     """Serialize a protocol value and reject unsupported Python objects early."""
     try:
-        return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        return json.dumps(
+            value,
+            allow_nan=False,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
     except (TypeError, ValueError) as error:
         raise ValueError(f"ComputeSDK values must be JSON serializable: {error}") from error
 
@@ -742,10 +752,10 @@ def _mapping_values(value: object) -> tuple[str, ...]:
 
 
 def _redact(message: str, secrets: Sequence[str]) -> str:
-    """Replace every non-empty secret before a diagnostic crosses into user output."""
-    for secret in secrets:
-        if secret:
-            message = message.replace(secret, "[REDACTED]")
+    """Replace secrets longest-first so overlapping values cannot expose suffixes."""
+    ordered = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+    for secret in ordered:
+        message = message.replace(secret, "[REDACTED]")
     return message
 
 

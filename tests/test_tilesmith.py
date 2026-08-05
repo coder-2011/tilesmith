@@ -158,9 +158,9 @@ class TilesmithAgentTests(unittest.TestCase):
         medium = Mock(agency="medium", loops=1, max_model_calls=None, skills=())
         high = Mock(agency="high", loops=1, max_model_calls=None, skills=())
 
-        low_prompt = tilesmith._agent_instructions(low, _Evaluator())
-        medium_prompt = tilesmith._agent_instructions(medium, _Evaluator())
-        high_prompt = tilesmith._agent_instructions(high, _Evaluator())
+        low_prompt = tilesmith._agent_instructions(low, _Evaluator(), ())
+        medium_prompt = tilesmith._agent_instructions(medium, _Evaluator(), ())
+        high_prompt = tilesmith._agent_instructions(high, _Evaluator(), ())
 
         self.assertIn("Keep the existing wrapper", low_prompt)
         self.assertIn("Do not fuse, split, add, or remove kernels", low_prompt)
@@ -176,6 +176,19 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(tilesmith._read_settings(None, "").agency, "medium")
         with self.assertRaisesRegex(ValueError, "agency must be 'low', 'medium'"):
             tilesmith._read_settings(None, "", agency="unbounded")
+
+    # test_skill_snapshot_stabilizes_prompt protects cache identity from concurrent file edits.
+    def test_skill_snapshot_stabilizes_prompt(self):
+        settings = Mock(agency="low", loops=1, max_model_calls=None)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "SKILL.md"
+            path.write_text("snapshot-before-edit", encoding="utf-8")
+            skills = tilesmith._load_skills((path,))
+            path.write_text("contents-after-edit", encoding="utf-8")
+            prompt = tilesmith._agent_instructions(settings, _Evaluator(), skills)
+
+        self.assertIn("snapshot-before-edit", prompt)
+        self.assertNotIn("contents-after-edit", prompt)
 
     # test_track_enforces_one_new_benchmark_per_loop checks the costly stateful edge cases together.
     def test_track_enforces_one_new_benchmark_per_loop(self):
@@ -304,6 +317,7 @@ class TilesmithAgentTests(unittest.TestCase):
             "def call(args):\n    return args\n",
         )
         remote_source = source.replace("return args", "return optimized")
+        active_source = source.replace("return args", "return active")
         worker = Mock()
         worker.shell.return_value = {"exit_code": 0, "stdout": "profile complete"}
         worker.read_text.return_value = remote_source
@@ -311,10 +325,14 @@ class TilesmithAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             workspace = tilesmith._AttemptWorkspace(Path(directory), source)
             workspace.prepare_next()
+            workspace.write_latest(active_source)
+            workspace.read_candidate("/attempts/attempt_00.py")
             report = tilesmith._run_gpu_shell(worker, workspace, "ncu ...", 600)
             synced_source = workspace.read_latest()
 
-        worker.write_text.assert_called_once_with("workbench/candidate.py", source)
+        worker.write_text.assert_called_once_with(
+            "workbench/candidate.py", active_source
+        )
         worker.shell.assert_called_once_with("ncu ...", 600)
         self.assertEqual(synced_source, remote_source)
         self.assertIn("copied to local attempt", report["candidate_sync"])
@@ -389,6 +407,21 @@ class TilesmithAgentTests(unittest.TestCase):
             bridge._stderr.close()
 
         asyncio.run(exercise())
+
+    # test_compute_bridge_rejects_ambiguous_values covers protocol safety edges together.
+    def test_compute_bridge_rejects_ambiguous_values(self):
+        from tilesmith.sandboxes.computesdk import _Bridge, _json_bytes, _redact
+
+        self.assertEqual(_redact("abcdef", ("abc", "abcdef")), "[REDACTED]")
+        with self.assertRaisesRegex(ValueError, "JSON serializable"):
+            _json_bytes({"value": float("nan")})
+
+        bridge = _Bridge((), "priority", True, 1.0)
+        try:
+            with self.assertRaisesRegex(ValueError, "finite and positive"):
+                asyncio.run(bridge.call("noop", timeout=0))
+        finally:
+            bridge._stderr.close()
 
     # test_real_graph_installs_measured_file proves LangGraph retries an unbenchmarked loop.
     def test_real_graph_installs_measured_source(self):
@@ -478,6 +511,7 @@ class TilesmithAgentTests(unittest.TestCase):
                     settings,
                     evaluator,
                     Path(directory) / "track",
+                    (),
                 )
             attempts = sorted((Path(directory) / "track" / "attempts").glob("*.py"))
             profiles = Path(directory) / "track" / "profiles"
@@ -545,7 +579,7 @@ class TilesmithAgentTests(unittest.TestCase):
                 patch.object(tilesmith, "_chat_model", return_value=model),
                 self.assertRaisesRegex(RuntimeError, "max_model_calls=1"),
             ):
-                tilesmith._run_agent(source, settings, _Evaluator(), track)
+                tilesmith._run_agent(source, settings, _Evaluator(), track, ())
             final_trace = (track / "profiles" / "trace_01.json").read_text()
 
         self.assertIn('"model_call_limit_reached": true', final_trace)
