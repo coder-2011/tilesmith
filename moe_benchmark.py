@@ -2,16 +2,20 @@
 
 import argparse
 import asyncio
+import base64
 import json
 import math
 import os
 import shlex
+import stat
 import statistics
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REMOTE_ROOT = "/tmp/tilesmith-moe"
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+LOG_CHUNK_BYTES = 256 * 1024
 
 
 # _require_success turns one remote process failure into a bounded host error.
@@ -20,9 +24,7 @@ def _require_success(result, operation):
     if result.exit_code == 0:
         return
     details = (result.stderr or result.stdout).strip()[-4_000:]
-    raise RuntimeError(
-        f"{operation} failed with exit code {result.exit_code}: {details}"
-    )
+    raise RuntimeError(f"{operation} failed with exit code {result.exit_code}: {details}")
 
 
 # _agent_environment forwards only the model credential needed by the remote process.
@@ -59,56 +61,108 @@ def _skill_files():
     return files
 
 
-# _upload_runtime transfers only the files the remote public API actually imports.
-async def _upload_runtime(sandbox):
-    """Upload Tilesmith, the benchmark, and trusted agent context."""
-    skill_files = _skill_files()
-    directories = {
-        str(Path(destination).parent) for destination in skill_files.values()
+# _upload_manifest snapshots and validates every local file before paid provisioning.
+def _upload_manifest():
+    """Return immutable UTF-8 uploads after rejecting links, duplicates, and excess."""
+    package_root = ROOT / "src" / "tilesmith"
+    remote_package = f"{REMOTE_ROOT}/tilesmith"
+    paths = {
+        ROOT / "moe_benchmark.py": f"{REMOTE_ROOT}/moe_benchmark.py",
+        ROOT / "requirements.txt": f"{REMOTE_ROOT}/requirements.txt",
+        package_root / "__init__.py": f"{remote_package}/__init__.py",
+        package_root / "measurement.py": f"{remote_package}/measurement.py",
+        package_root / "sandbox_worker.py": f"{remote_package}/sandbox_worker.py",
+        package_root / "sandboxes" / "__init__.py": (f"{remote_package}/sandboxes/__init__.py"),
+        package_root / "sandboxes" / "_computesdk_bridge.cjs": (f"{remote_package}/sandboxes/_computesdk_bridge.cjs"),
+        package_root / "sandboxes" / "computesdk.py": (f"{remote_package}/sandboxes/computesdk.py"),
+        **_skill_files(),
     }
+    manifest = {}
+    total = 0
+    for source, destination in paths.items():
+        try:
+            source_stat = source.lstat()
+        except OSError as error:
+            raise ValueError(f"upload source is unavailable: {source}") from error
+        if not stat.S_ISREG(source_stat.st_mode) or source.is_symlink():
+            raise ValueError(f"upload source is not a regular file: {source}")
+        if destination in manifest:
+            raise ValueError(f"duplicate remote upload destination: {destination}")
+        if total + source_stat.st_size > MAX_UPLOAD_BYTES:
+            raise ValueError("remote upload manifest exceeds 16 MiB")
+        content = source.read_text(encoding="utf-8")
+        total += len(content.encode())
+        manifest[destination] = content
+    return manifest
+
+
+# _upload_runtime transfers only the files the remote public API actually imports.
+async def _upload_runtime(sandbox, manifest):
+    """Upload Tilesmith, the benchmark, and trusted agent context."""
+    directories = {str(Path(destination).parent) for destination in manifest}
     directories.add(REMOTE_ROOT)
     directories.add(f"{REMOTE_ROOT}/tilesmith/sandboxes")
-    command = "mkdir -p " + " ".join(sorted(directories))
+    command = shlex.join(["mkdir", "-p", *sorted(directories)])
     _require_success(
         await sandbox.run_command(command, timeout_ms=60_000),
         "remote directory setup",
     )
-    package_root = ROOT / "src" / "tilesmith"
-    remote_package = f"{REMOTE_ROOT}/tilesmith"
-    for source, destination in (
-        (ROOT / "moe_benchmark.py", f"{REMOTE_ROOT}/moe_benchmark.py"),
-        (ROOT / "requirements.txt", f"{REMOTE_ROOT}/requirements.txt"),
-        (package_root / "__init__.py", f"{remote_package}/__init__.py"),
-        (package_root / "measurement.py", f"{remote_package}/measurement.py"),
-        (package_root / "sandbox_worker.py", f"{remote_package}/sandbox_worker.py"),
-        (
-            package_root / "sandboxes" / "__init__.py",
-            f"{remote_package}/sandboxes/__init__.py",
-        ),
-        (
-            package_root / "sandboxes" / "_computesdk_bridge.cjs",
-            f"{remote_package}/sandboxes/_computesdk_bridge.cjs",
-        ),
-        (
-            package_root / "sandboxes" / "computesdk.py",
-            f"{remote_package}/sandboxes/computesdk.py",
-        ),
-    ):
-        await sandbox.write_file(destination, source.read_text(encoding="utf-8"))
-    for source, destination in skill_files.items():
-        await sandbox.write_file(destination, source.read_text(encoding="utf-8"))
+    for destination, content in manifest.items():
+        await sandbox.write_file(destination, content)
+
+
+# _read_log_chunk transfers each remote log byte at most once.
+async def _read_log_chunk(sandbox, path, offset):
+    """Read one bounded base64 log range and return decoded text plus byte count."""
+    script = (
+        "import base64, pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "data = b''\n"
+        "if path.exists():\n"
+        "    with path.open('rb') as handle:\n"
+        "        handle.seek(int(sys.argv[2]))\n"
+        "        data = handle.read(int(sys.argv[3]))\n"
+        "print(base64.b64encode(data).decode())\n"
+    )
+    command = shlex.join(["python3", "-c", script, path, str(offset), str(LOG_CHUNK_BYTES)])
+    result = await sandbox.run_command(command, timeout_ms=60_000)
+    _require_success(result, f"read remote log {path}")
+    data = base64.b64decode(result.stdout.strip(), validate=True)
+    return data.decode("utf-8", errors="replace"), len(data)
+
+
+# _redact_log prevents the forwarded model credential from appearing in live output.
+def _redact_log(content, environment):
+    """Replace the model API key in one worker-output chunk."""
+    secret = environment.get("OPENAI_API_KEY", "")
+    return content.replace(secret, "[REDACTED]") if secret else content
 
 
 # _run_worker streams a background process through ordinary sandbox files.
 async def _run_worker(sandbox, environment):
-    """Run the GPU worker while polling complete stdout and stderr traces."""
+    """Run the GPU worker under one end-to-end 2,400-second deadline."""
+    async with asyncio.timeout(2_400):
+        await _run_worker_process(sandbox, environment)
+
+
+# _run_worker_process launches one worker and consumes bounded incremental logs.
+async def _run_worker_process(sandbox, environment):
+    """Launch the worker, follow new log bytes, and require its atomic exit marker."""
     stdout_path = f"{REMOTE_ROOT}/worker.stdout"
     stderr_path = f"{REMOTE_ROOT}/worker.stderr"
     exit_path = f"{REMOTE_ROOT}/worker.exit"
+    exit_temp = f"{exit_path}.tmp"
+    cleanup = shlex.join(["rm", "-f", stdout_path, stderr_path, exit_path, exit_temp])
+    _require_success(
+        await sandbox.run_command(cleanup, timeout_ms=60_000),
+        "remote worker cleanup",
+    )
     worker = shlex.join(["python3", f"{REMOTE_ROOT}/moe_benchmark.py", "--worker"])
     script = (
         f"{worker} > {shlex.quote(stdout_path)} 2> {shlex.quote(stderr_path)}; "
-        f"printf '%s' $? > {shlex.quote(exit_path)}"
+        "status=$?; "
+        f"printf '%s' \"$status\" > {shlex.quote(exit_temp)}; "
+        f"mv -f -- {shlex.quote(exit_temp)} {shlex.quote(exit_path)}"
     )
     command = f"nohup {shlex.join(['sh', '-lc', script])} > /dev/null 2>&1 &"
     launcher = await sandbox.run_command(
@@ -121,39 +175,49 @@ async def _run_worker(sandbox, environment):
 
     offsets = {stdout_path: 0, stderr_path: 0}
     streams = {stdout_path: sys.stdout, stderr_path: sys.stderr}
-    deadline = asyncio.get_running_loop().time() + 2_400
+    stderr_tail = ""
     while True:
-        # File polling avoids ComputeSDK's daemon streaming path and retains full logs.
+        finished = await sandbox.exists(exit_path)
+        # Range polling keeps bridge traffic linear as worker logs grow.
         for path, stream in streams.items():
-            if not await sandbox.exists(path):
-                continue
-            content = await sandbox.read_file(path)
-            offset = offsets[path]
-            if len(content) > offset:
-                print(content[offset:], end="", file=stream, flush=True)
-                offsets[path] = len(content)
-        if await sandbox.exists(exit_path):
+            while True:
+                content, consumed = await _read_log_chunk(
+                    sandbox,
+                    path,
+                    offsets[path],
+                )
+                if consumed == 0:
+                    break
+                offsets[path] += consumed
+                safe_content = _redact_log(content, environment)
+                print(safe_content, end="", file=stream, flush=True)
+                if path == stderr_path:
+                    stderr_tail = (stderr_tail + safe_content)[-4_000:]
+                if consumed < LOG_CHUNK_BYTES:
+                    break
+        if finished:
             break
-        if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError("remote MoE benchmark exceeded 2400 seconds")
         await asyncio.sleep(2)
 
-    exit_code = int((await sandbox.read_file(exit_path)).strip())
+    marker = (await sandbox.read_file(exit_path)).strip()
+    if not marker or not marker.lstrip("-").isdigit():
+        raise RuntimeError(f"remote MoE benchmark returned invalid exit marker {marker!r}")
+    exit_code = int(marker)
     if exit_code != 0:
-        stderr = await sandbox.read_file(stderr_path) if await sandbox.exists(stderr_path) else ""
-        raise RuntimeError(
-            f"remote MoE benchmark failed with exit code {exit_code}: {stderr[-4_000:]}"
-        )
+        raise RuntimeError(f"remote MoE benchmark failed with exit code {exit_code}: {stderr_tail}")
 
 
 # _run_remote owns the paid GPU lifecycle and streams progress to the caller.
 async def _run_remote(model, chip):
     """Provision one requested GPU, run the worker, and always tear it down."""
+    from tilesmith import _read_compute_config
     from tilesmith.measurement import chip_matches
     from tilesmith.sandboxes.computesdk import ComputeSDKClient, ProviderSpec
-    from tilesmith import _read_compute_config
 
+    if not chip_matches(chip, chip):
+        raise ValueError("chip must contain a GPU model such as L4, H100, or B200")
     config = _read_compute_config(chip)
+    manifest = _upload_manifest()
     agent_environment = _agent_environment(model)
     provider = ProviderSpec(
         package=config.provider_package,
@@ -179,16 +243,14 @@ async def _run_remote(model, chip):
                 flush=True,
             )
             await sandbox.wait_until_ready(readiness_timeout)
-            await _upload_runtime(sandbox)
+            await _upload_runtime(sandbox, manifest)
             capability = await sandbox.run_command(
                 "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader && df -h /",
                 timeout_ms=60_000,
             )
             _require_success(capability, "GPU capability check")
             if not chip_matches(config.chip, capability.stdout):
-                raise RuntimeError(
-                    f"requested {config.chip}, sandbox reported {capability.stdout.strip()}"
-                )
+                raise RuntimeError(f"requested {config.chip}, sandbox reported {capability.stdout.strip()}")
             print(capability.stdout, end="", flush=True)
             print("installing the remote PyTorch and agent runtime...", flush=True)
             install = await sandbox.run_command(
@@ -233,9 +295,7 @@ def _worker():
         def __init__(self, width, hidden, expert_count):
             super().__init__()
             self.router = nn.Linear(width, expert_count, bias=False)
-            self.experts = nn.ModuleList(
-                Expert(width, hidden) for _ in range(expert_count)
-            )
+            self.experts = nn.ModuleList(Expert(width, hidden) for _ in range(expert_count))
             self.expert_count = expert_count
 
         # forward mixes the top-two expert outputs with normalized router weights.
@@ -248,9 +308,7 @@ def _worker():
                 [expert(inputs) for expert in self.experts],
                 dim=-2,
             )
-            return (expert_outputs * weights.to(inputs.dtype).unsqueeze(-1)).sum(
-                dim=-2
-            )
+            return (expert_outputs * weights.to(inputs.dtype).unsqueeze(-1)).sum(dim=-2)
 
     class MoETransformer(nn.Module):
         """Combine causal self-attention and top-two MoE token mixing."""
@@ -316,6 +374,8 @@ def _worker():
                     end.record()
                     end.synchronize()
                     timings[name].append(start.elapsed_time(end) / iterations)
+        if any(not math.isfinite(value) or value <= 0 for samples_ms in timings.values() for value in samples_ms):
+            raise RuntimeError("benchmark returned non-finite or non-positive timing")
         return {
             name: {
                 "median_ms": statistics.median(samples_ms),
@@ -370,33 +430,41 @@ def _worker():
     )
     inductor_ms = timings["torch_compile"]["median_ms"]
     tilesmith_ms = timings["tilesmith_compile"]["median_ms"]
+    with torch.no_grad():
+        eager_output = eager(tokens)
+        inductor_output = inductor(tokens)
+        optimized_output = optimized(tokens)
+    torch.testing.assert_close(
+        optimized_output,
+        eager_output,
+        atol=1.5e-1,
+        rtol=2e-2,
+    )
     result = {
         "cuda": torch.version.cuda,
         "dtype": "bfloat16",
         "gpu": torch.cuda.get_device_name(),
         "input_shape": list(tokens.shape),
-        "max_abs_error_torch_compile": float(
-            (inductor_output - eager_output).abs().max()
-        ),
-        "max_abs_error_tilesmith_compile": float(
-            (optimized_output - eager_output).abs().max()
-        ),
+        "max_abs_error_torch_compile": float((inductor_output - eager_output).abs().max()),
+        "max_abs_error_tilesmith_compile": float((optimized_output - eager_output).abs().max()),
         "output_shape": list(eager_output.shape),
         "torch": torch.__version__,
         "timings": timings,
     }
     print("TILESMITH_MOE_RESULT=" + json.dumps(result, sort_keys=True))
-    if tilesmith_ms >= inductor_ms:
-        raise RuntimeError(
-            f"Tilesmith did not beat torch.compile: {tilesmith_ms:.6f} ms "
-            f">= {inductor_ms:.6f} ms"
-        )
+    minimum_improvement = float(os.environ.get("TILESMITH_MIN_IMPROVEMENT", "0.02"))
+    if not math.isfinite(minimum_improvement) or not 0 <= minimum_improvement < 1:
+        raise ValueError("TILESMITH_MIN_IMPROVEMENT must be in [0, 1)")
+    improvement = (inductor_ms - tilesmith_ms) / inductor_ms
+    if improvement < minimum_improvement:
+        raise RuntimeError(f"Tilesmith improvement {improvement:.2%} is below the required {minimum_improvement:.2%}")
 
 
 # _parse_args distinguishes the local provisioner from its uploaded worker mode.
 def _parse_args():
     """Parse the explicit paid-run and internal worker options."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=("run",))
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--model",
@@ -408,7 +476,10 @@ def _parse_args():
         default=os.environ.get("TILESMITH_E2E_CHIP", "L4"),
         help="ComputeSDK GPU requested for the end-to-end proof",
     )
-    return parser.parse_args()
+    arguments = parser.parse_args()
+    if not arguments.worker and arguments.command != "run":
+        parser.error("the following arguments are required: command (run)")
+    return arguments
 
 
 # main runs either the local paid provisioner or the remote GPU worker.

@@ -26,4 +26,5 @@ correct speedup, it keeps the normal TorchInductor result.
 
 The main optional settings are `agency="low" | "medium" | "high"`, `loops`,
 and `max_model_calls`. Their defaults are `"medium"`, `1`, and no model-call
-limit.
+limit. `fullgraph`, `dynamic`, `mode`, and `options` are passed through to
+PyTorch.

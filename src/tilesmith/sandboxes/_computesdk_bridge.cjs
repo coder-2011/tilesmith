@@ -11,6 +11,11 @@ const providers = new Map();
 const sandboxes = new Map();
 const ownedSandboxIds = new Set();
 const createOperations = new Map();
+const destroyOperations = new Map();
+const maxResponseBytes = 128 * 1024 * 1024;
+const maxQueuedStreamBytes = 8 * 1024 * 1024;
+let outputQueue = Promise.resolve();
+let queuedStreamBytes = 0;
 let shuttingDown = false;
 
 /** Keep provider diagnostics away from the JSON-lines protocol on stdout. */
@@ -44,9 +49,43 @@ function serialize(value) {
   return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item);
 }
 
-/** Write one protocol message without allowing provider logs to corrupt it. */
+/** Queue one bounded protocol message and honor stdout backpressure. */
 function send(value) {
-  process.stdout.write(`${serialize(value)}\n`);
+  let encoded = serialize(value);
+  if (Buffer.byteLength(encoded) > maxResponseBytes) {
+    const id = value.id ?? value.requestId;
+    encoded = serialize({ id, error: { name: "RangeError", message: "ComputeSDK response exceeds 128 MiB" } });
+  }
+  const line = `${encoded}\n`;
+  const size = Buffer.byteLength(line);
+  if (value.event && queuedStreamBytes + size > maxQueuedStreamBytes) {
+    return Promise.resolve();
+  }
+  if (value.event) {
+    queuedStreamBytes += size;
+  }
+  const completion = outputQueue.then(() => new Promise((resolve, reject) => {
+    if (process.stdout.write(line)) {
+      resolve();
+      return;
+    }
+    const onDrain = () => {
+      process.stdout.off("error", onError);
+      resolve();
+    };
+    const onError = (error) => {
+      process.stdout.off("drain", onDrain);
+      reject(error);
+    };
+    process.stdout.once("drain", onDrain);
+    process.stdout.once("error", onError);
+  }));
+  outputQueue = completion.catch(() => {});
+  return completion.finally(() => {
+    if (value.event) {
+      queuedStreamBytes -= size;
+    }
+  });
 }
 
 /** Return the stable identity needed to reconstruct a Python Sandbox handle. */
@@ -128,7 +167,7 @@ async function abortCreateOperations() {
 }
 
 /** Terminate a provider sandbox and wait until Modal confirms teardown. */
-async function destroySandbox(sandbox) {
+async function terminateSandbox(sandbox) {
   const instance = typeof sandbox.getInstance === "function" ? sandbox.getInstance() : undefined;
   const nativeSandbox = instance?.sandbox ?? instance;
   if (nativeSandbox && typeof nativeSandbox.terminate === "function") {
@@ -138,17 +177,35 @@ async function destroySandbox(sandbox) {
   await sandbox.destroy();
 }
 
+/** Reuse one in-flight provider teardown for every request targeting an ID. */
+async function destroySandboxById(sandboxId) {
+  let operation = destroyOperations.get(sandboxId);
+  if (!operation) {
+    operation = (async () => {
+      const sandbox = sandboxes.get(sandboxId);
+      if (sandbox) {
+        await terminateSandbox(sandbox);
+      } else {
+        await compute.sandbox.destroy(sandboxId);
+      }
+      sandboxes.delete(sandboxId);
+      ownedSandboxIds.delete(sandboxId);
+    })();
+    destroyOperations.set(sandboxId, operation);
+  }
+  try {
+    await operation;
+  } finally {
+    if (destroyOperations.get(sandboxId) === operation) {
+      destroyOperations.delete(sandboxId);
+    }
+  }
+}
+
 /** Destroy every sandbox created by this bridge before the Node process exits. */
 async function destroyOwnedSandboxes() {
   const results = await Promise.allSettled([...ownedSandboxIds].map(async (sandboxId) => {
-    const sandbox = sandboxes.get(sandboxId);
-    if (sandbox) {
-      await destroySandbox(sandbox);
-    } else {
-      await compute.sandbox.destroy(sandboxId);
-    }
-    sandboxes.delete(sandboxId);
-    ownedSandboxIds.delete(sandboxId);
+    await destroySandboxById(sandboxId);
   }));
   const failures = results.filter((result) => result.status === "rejected");
   if (failures.length > 0) {
@@ -224,29 +281,21 @@ async function dispatch(request) {
       return listed.map(describeSandbox);
     }
     case "destroySandbox":
-      if (sandboxes.has(request.sandboxId)) {
-        await destroySandbox(sandboxes.get(request.sandboxId));
-      } else {
-        await compute.sandbox.destroy(request.sandboxId);
-      }
-      sandboxes.delete(request.sandboxId);
-      ownedSandboxIds.delete(request.sandboxId);
+      await destroySandboxById(request.sandboxId);
       return null;
     case "sandboxDestroy": {
-      const sandbox = await getSandbox(request.sandboxId);
-      await destroySandbox(sandbox);
-      sandboxes.delete(request.sandboxId);
-      ownedSandboxIds.delete(request.sandboxId);
+      await getSandbox(request.sandboxId);
+      await destroySandboxById(request.sandboxId);
       return null;
     }
     case "runCommand": {
       const sandbox = await getSandbox(request.sandboxId);
       const options = { ...(request.options || {}) };
       if (request.streamStdout) {
-        options.onStdout = (data) => send({ event: "stdout", requestId: request.id, data });
+        options.onStdout = (data) => void send({ event: "stdout", requestId: request.id, data });
       }
       if (request.streamStderr) {
-        options.onStderr = (data) => send({ event: "stderr", requestId: request.id, data });
+        options.onStderr = (data) => void send({ event: "stderr", requestId: request.id, data });
       }
       return sandbox.runCommand(request.command, options);
     }
@@ -333,14 +382,14 @@ async function handleLine(line) {
   try {
     request = JSON.parse(line);
     const result = await dispatch(request);
-    send({ id: request.id, result });
+    await send({ id: request.id, result });
     if (request.action === "close") {
       setImmediate(() => process.exit(0));
     }
   } catch (error) {
     const name = error instanceof Error ? error.name : "Error";
     const message = error instanceof Error ? error.message : String(error);
-    send({ id: request?.id, error: { name, message } });
+    await send({ id: request?.id, error: { name, message } });
   }
 }
 

@@ -8,10 +8,24 @@ import sys
 from pathlib import Path
 
 try:
-    from .measurement import assert_candidate_matches, benchmark_pair, chip_matches
+    from .measurement import (
+        assert_candidate_matches,
+        assert_tensor_aliases_match,
+        assert_tensor_graph_matches,
+        benchmark_pair,
+        chip_matches,
+        clone_tensor_graph,
+    )
 except ImportError:
     # The GPU sandbox runs this copied source as worker.py beside measurement.py.
-    from measurement import assert_candidate_matches, benchmark_pair, chip_matches
+    from measurement import (
+        assert_candidate_matches,
+        assert_tensor_aliases_match,
+        assert_tensor_graph_matches,
+        benchmark_pair,
+        chip_matches,
+        clone_tensor_graph,
+    )
 
 
 ROOT = Path(__file__).resolve().parent
@@ -39,25 +53,14 @@ def _load_generated(torch, path, constants):
 
 # _clone_inputs keeps reference and candidate executions from sharing mutable tensors.
 def _clone_inputs(torch, inputs):
-    return tuple(
-        value.clone(memory_format=torch.preserve_format)
-        if torch.is_tensor(value)
-        else value
-        for value in inputs
-    )
+    """Clone one input graph without losing repeated references or tensor views."""
+    return clone_tensor_graph(torch, tuple(inputs))
 
 
 # _to_cuda restores recursively serialized inputs and constants on the sandbox GPU.
 def _to_cuda(torch, value):
-    if torch.is_tensor(value):
-        return value.to("cuda", memory_format=torch.preserve_format)
-    if isinstance(value, tuple):
-        return tuple(_to_cuda(torch, item) for item in value)
-    if isinstance(value, list):
-        return [_to_cuda(torch, item) for item in value]
-    if isinstance(value, dict):
-        return {key: _to_cuda(torch, item) for key, item in value.items()}
-    return value
+    """Move one serialized tensor graph to CUDA while preserving storage aliases."""
+    return clone_tensor_graph(torch, value, map_location="cuda")
 
 
 # _outputs normalizes a single tensor and a tuple of tensors for comparison.
@@ -97,21 +100,16 @@ def _request():
 def _validate_environment(metadata, request):
     requested_chip = str(request["chip"])
     if not chip_matches(requested_chip, metadata["gpu"]):
-        raise RuntimeError(
-            f"requested {requested_chip}, sandbox provisioned {metadata['gpu']}"
-        )
+        raise RuntimeError(f"requested {requested_chip}, sandbox provisioned {metadata['gpu']}")
     for package in ("torch", "triton"):
         expected = request.get(package)
         if expected is not None and str(expected) != metadata[package]:
-            raise RuntimeError(
-                f"{package} version mismatch: host {expected}, "
-                f"sandbox {metadata[package]}"
-            )
+            raise RuntimeError(f"{package} version mismatch: host {expected}, sandbox {metadata[package]}")
 
 
 # _check compares the controlled generated wrapper against eager PyTorch.
 def _check(torch, workload, kernel):
-    if hasattr(workload, "make_cases"):
+    if hasattr(workload, "make_cases"):  # noqa: SIM108 - keep the optional workload protocol readable.
         cases = workload.make_cases("cuda")
     else:
         cases = [workload.make_inputs("cuda")]
@@ -218,8 +216,15 @@ def _compare(torch, triton):
     serialized = torch.load(ROOT / "payload.pt", map_location="cpu", weights_only=False)
     constants = _to_cuda(torch, serialized["constants"])
     inputs = _to_cuda(torch, serialized["inputs"])
-    baseline = _load_generated(torch, ROOT / "baseline.py", constants)
-    candidate = _load_generated(torch, ROOT / "candidate.py", constants)
+    baseline_constants = clone_tensor_graph(torch, constants)
+    candidate_constants = clone_tensor_graph(torch, constants)
+    constant_snapshot = clone_tensor_graph(torch, candidate_constants)
+    baseline = _load_generated(torch, ROOT / "baseline.py", baseline_constants)
+    candidate = _load_generated(
+        torch,
+        ROOT / "candidate.py",
+        candidate_constants,
+    )
     assert_candidate_matches(torch, baseline, candidate, inputs)
     torch.cuda.synchronize()
 
@@ -234,6 +239,19 @@ def _compare(torch, triton):
             int(request["iterations"]),
             int(request["samples"]),
         )
+    )
+    assert_candidate_matches(torch, baseline, candidate, inputs)
+    assert_tensor_graph_matches(
+        torch,
+        candidate_constants,
+        constant_snapshot,
+        "candidate constants",
+    )
+    assert_tensor_aliases_match(
+        torch,
+        candidate_constants,
+        constant_snapshot,
+        "candidate constants",
     )
     metadata["reference"] = "torch_inductor_generated"
     return metadata
@@ -261,6 +279,7 @@ def _evaluate_fixture(torch, triton):
     metadata["cases"] = _check(torch, workload, candidate)
 
     metadata.update(_benchmark_fixture(torch, workload, candidate, request))
+    _check(torch, workload, candidate)
     return metadata
 
 
@@ -286,8 +305,19 @@ def _run_fixture(torch, triton):
     return {"ran": True}
 
 
+# _write_result atomically replaces stale evidence only after encoding succeeds.
+def _write_result(result):
+    """Publish one complete JSON result without exposing a partial destination."""
+    encoded = json.dumps(result, sort_keys=True)
+    temporary = ROOT / f".result-{os.getpid()}.json"
+    temporary.write_text(encoded, encoding="utf-8")
+    os.replace(temporary, ROOT / "result.json")
+    return len(encoded)
+
+
 # main dispatches the single requested worker action and emits one JSON report.
 def main():
+    """Run exactly one known worker action and atomically publish its result."""
     import torch
     import triton
 
@@ -302,10 +332,9 @@ def main():
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} {'|'.join(actions)}")
     result = actions[sys.argv[1]](torch, triton)
-    encoded = json.dumps(result, sort_keys=True)
     # Large traces travel through the file endpoint instead of truncation-prone command output.
-    (ROOT / "result.json").write_text(encoded, encoding="utf-8")
-    print(json.dumps({"result_bytes": len(encoded)}, sort_keys=True))
+    result_bytes = _write_result(result)
+    print(json.dumps({"result_bytes": result_bytes}, sort_keys=True))
 
 
 if __name__ == "__main__":

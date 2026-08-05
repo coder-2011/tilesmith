@@ -62,12 +62,13 @@ correctness, timing, and fresh-confirmation gates.
 repetitions. It defaults to `1`. A slower, incorrect, duplicate, or marginal
 candidate is rejected and the same loop continues.
 
-`max_model_calls` is an optional exact budget shared by the main agent and its
-subagents. It defaults to `None`; there is no default 70-step limit. Shell,
-tool, benchmark, and graph-transition calls do not consume this budget. For
-example, `max_model_calls=70` permits exactly 70 model calls and blocks the
-71st. If an explicit budget expires without a validated win, Tilesmith keeps
-ordinary Inductor rather than installing an unconfirmed candidate.
+`max_model_calls` is an optional exact budget on LangChain model invocations
+shared by the main agent and its subagents. It defaults to `None`; there is no
+default 70-step limit. Provider transport retries remain inside one invocation.
+Shell, tool, benchmark, and graph-transition calls do not consume this budget.
+For example, `max_model_calls=70` permits 70 invocations and blocks the 71st.
+If the budget expires without a validated win, Tilesmith keeps ordinary
+Inductor rather than installing an unconfirmed candidate.
 
 Dynamic-shape, mixed-device, multi-GPU, input-mutating, and already wrapped
 graphs currently stay on ordinary Inductor. A raw single-GPU CUDA wrapper stays
@@ -184,7 +185,7 @@ On August 3, 2026, the public interface was tested with the deterministic BF16
 top-two MoE Transformer in `moe_benchmark.py`:
 
 ```sh
-python3 moe_benchmark.py --chip L4 --model openai/gpt-5.3-codex
+python3 moe_benchmark.py run --chip L4 --model openai/gpt-5.3-codex
 ```
 
 The workload used an `8 × 128` token input, width 256, eight attention heads,

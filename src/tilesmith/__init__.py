@@ -1,6 +1,8 @@
+"""Optimize eligible TorchInductor CUDA wrappers with a measured agent loop."""
+
 import asyncio
-import builtins
 import base64
+import builtins
 import contextlib
 import fcntl
 import hashlib
@@ -10,7 +12,9 @@ import io
 import json
 import math
 import os
+import platform
 import shlex
+import stat
 import sys
 import tempfile
 import threading
@@ -23,11 +27,13 @@ from typing import TypedDict
 
 from .measurement import (
     assert_candidate_matches,
+    assert_tensor_aliases_match,
+    assert_tensor_graph_matches,
     benchmark_pair,
     chip_matches,
+    clone_tensor_graph,
     variant_inputs,
 )
-
 
 ROOT = Path(__file__).resolve().parent
 WARMUP = 25
@@ -141,6 +147,14 @@ class _AgentResult:
     model_calls: int
 
 
+@dataclass(frozen=True)
+class _CachedSource:
+    """Carry verified cache bytes without reopening a shared artifact."""
+
+    path: Path
+    source: bytes
+
+
 class _LoopState(TypedDict):
     """Carry deterministic loop progress around the outer LangGraph."""
 
@@ -155,12 +169,17 @@ def compile(
     model,
     *,
     example_inputs,
+    fullgraph=False,
+    dynamic=None,
+    mode=None,
+    options=None,
     agency="medium",
     loops=1,
     max_model_calls=None,
     sandbox=None,
     chip=None,
 ):
+    """Compile a CUDA model and lazily install only a confirmed optimization."""
     if sandbox not in (None, "computesdk"):
         raise ValueError("sandbox must be None or 'computesdk'")
     if sandbox is None and chip is not None:
@@ -177,29 +196,26 @@ def compile(
     if not isinstance(example_inputs, tuple):
         raise TypeError("example_inputs must be a tuple of positional model arguments")
     leaves = torch.utils._pytree.tree_leaves(example_inputs)
-    cuda_inputs = [
-        value
-        for value in leaves
-        if torch.is_tensor(value) and value.device.type == "cuda"
-    ]
+    cuda_inputs = [value for value in leaves if torch.is_tensor(value) and value.device.type == "cuda"]
     if not cuda_inputs:
         raise ValueError("example_inputs must contain at least one CUDA tensor")
     if sandbox == "computesdk":
         device = cuda_inputs[0].device
-        index = (
-            device.index if device.index is not None else torch.cuda.current_device()
-        )
+        index = device.index if device.index is not None else torch.cuda.current_device()
         device_name = torch.cuda.get_device_name(index)
         if not chip_matches(chip, device_name):
-            raise ValueError(
-                f"chip={chip!r} does not match local execution device {device_name!r}"
-            )
+            raise ValueError(f"chip={chip!r} does not match local execution device {device_name!r}")
     if "inner_compile" not in inspect.signature(compile_fx).parameters:
-        raise RuntimeError(
-            "this PyTorch version does not expose Inductor's inner_compile hook"
-        )
+        raise RuntimeError("this PyTorch version does not expose Inductor's inner_compile hook")
 
-    return torch.compile(model, backend=_Backend(settings))
+    return torch.compile(
+        model,
+        backend=_Backend(settings, dynamic),
+        fullgraph=fullgraph,
+        dynamic=dynamic,
+        mode=mode,
+        options=options,
+    )
 
 
 # _read_settings keeps the public API small while making expensive agent choices explicit in the environment.
@@ -208,11 +224,7 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
     timeout = float(os.environ.get("TILESMITH_TIMEOUT", "1200"))
     if isinstance(loops, bool) or not isinstance(loops, int) or loops < 1:
         raise ValueError("loops must be a positive integer")
-    if max_model_calls is not None and (
-        isinstance(max_model_calls, bool)
-        or not isinstance(max_model_calls, int)
-        or max_model_calls < 1
-    ):
+    if max_model_calls is not None and (isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int) or max_model_calls < 1):
         raise ValueError("max_model_calls must be None or a positive integer")
     if not isinstance(agency, str) or agency not in AGENCY_PROMPTS:
         raise ValueError("agency must be 'low', 'medium', or 'high'")
@@ -224,9 +236,7 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
     cache_default = Path.home() / ".cache" / "tilesmith"
     return _Settings(
         agency=agency,
-        cache_dir=Path(os.environ.get("TILESMITH_CACHE_DIR", cache_default))
-        .expanduser()
-        .resolve(),
+        cache_dir=Path(os.environ.get("TILESMITH_CACHE_DIR", cache_default)).expanduser().resolve(),
         compute=_read_compute_config(chip) if sandbox == "computesdk" else None,
         loops=loops,
         max_model_calls=max_model_calls,
@@ -243,36 +253,25 @@ def _read_compute_config(chip):
     try:
         from .sandboxes.computesdk import MODAL_VERSION, ProviderSpec
     except ImportError as error:
-        raise RuntimeError(
-            "sandbox='computesdk' requires the bundled sandboxes package"
-        ) from error
+        raise RuntimeError("sandbox='computesdk' requires the bundled sandboxes package") from error
 
     provider = os.environ.get("COMPUTESDK_PROVIDER") or "modal"
     package = os.environ.get("COMPUTESDK_PROVIDER_PACKAGE") or f"@computesdk/{provider}"
-    factory = os.environ.get("COMPUTESDK_PROVIDER_FACTORY") or _provider_factory_name(
-        provider
-    )
-    version = os.environ.get("COMPUTESDK_PROVIDER_VERSION") or (
-        MODAL_VERSION if provider == "modal" else ""
-    )
+    factory = os.environ.get("COMPUTESDK_PROVIDER_FACTORY") or _provider_factory_name(provider)
+    version = os.environ.get("COMPUTESDK_PROVIDER_VERSION") or (MODAL_VERSION if provider == "modal" else "")
     configured = os.environ.get("COMPUTESDK_PROVIDER_CONFIG")
     if configured:
         try:
             provider_config = json.loads(configured)
         except json.JSONDecodeError as error:
-            raise ValueError(
-                "COMPUTESDK_PROVIDER_CONFIG must contain valid JSON"
-            ) from error
+            raise ValueError("COMPUTESDK_PROVIDER_CONFIG must contain valid JSON") from error
         if not isinstance(provider_config, dict):
             raise ValueError("COMPUTESDK_PROVIDER_CONFIG must contain a JSON object")
     elif provider == "modal":
         token_id = os.environ.get("MODAL_TOKEN_ID", "")
         token_secret = os.environ.get("MODAL_TOKEN_SECRET", "")
         if not token_id or not token_secret:
-            raise ValueError(
-                "Modal ComputeSDK execution requires MODAL_TOKEN_ID and "
-                "MODAL_TOKEN_SECRET"
-            )
+            raise ValueError("Modal ComputeSDK execution requires MODAL_TOKEN_ID and MODAL_TOKEN_SECRET")
         provider_config = {"tokenId": token_id, "tokenSecret": token_secret}
     else:
         provider_config = {}
@@ -313,12 +312,7 @@ def _default_skills():
     paths = [
         skill_root / "check-normal" / "SKILL.md",
         skill_root / "high-performance-triton" / "SKILL.md",
-        Path.home()
-        / "Documents"
-        / "kernel-design-agents"
-        / "skills"
-        / "KernelWiki"
-        / "SKILL.md",
+        Path.home() / "Documents" / "kernel-design-agents" / "skills" / "KernelWiki" / "SKILL.md",
         cuda_root / "SKILL.md",
         cuda_root / "references" / "core-principles.md",
         cuda_root / "references" / "autotuning-and-benchmarking.md",
@@ -330,19 +324,24 @@ def _default_skills():
 
 class _Backend:
     # __init__ retains immutable settings across forward and lazy backward compilation.
-    def __init__(self, settings):
+    def __init__(self, settings, dynamic=None):
         self.settings = settings
+        self.dynamic = dynamic
 
     # __call__ gives Dynamo's graph to Inductor while keeping the interception path cache-visible.
-    def __call__(self, graph_module, example_inputs):
+    def __call__(self, graph_module, example_inputs, mode=None, options=None):
+        import torch
         from torch._functorch import config as functorch_config
         from torch._inductor.compile_fx import compile_fx
 
+        # Match torch.compile's Inductor mode and option translation before installing the inner hook.
+        inductor = torch._TorchCompileInductorWrapper(mode, options, self.dynamic)
         # AOTAutograd cache hits bypass inner_compile and would orphan Tilesmith's accepted artifact.
         with functorch_config.patch(enable_autograd_cache=False):
             return compile_fx(
                 graph_module,
                 example_inputs,
+                config_patches=inductor.config,
                 inner_compile=self._inner_compile,
             )
 
@@ -373,9 +372,7 @@ class _Backend:
                 dynamic_inputs = True
                 break
             if torch.is_tensor(value):
-                dynamic_inputs = any(
-                    isinstance(size, torch.SymInt) for size in value.shape
-                )
+                dynamic_inputs = any(isinstance(size, torch.SymInt) for size in value.shape)
                 if dynamic_inputs:
                     break
         if dynamic_inputs:
@@ -391,14 +388,11 @@ class _Backend:
             )
             return compiled
         if not _is_raw_generated_call(compiled):
-            warnings.warn(
-                "Tilesmith left a wrapped Inductor graph unchanged", stacklevel=2
-            )
+            warnings.warn("Tilesmith left a wrapped Inductor graph unchanged", stacklevel=2)
             return compiled
         if self.settings.compute is not None and set(compiled.device_idxs) != {0}:
             warnings.warn(
-                "Tilesmith left a non-cuda:0 graph unchanged because a one-GPU "
-                "sandbox exposes its device as cuda:0",
+                "Tilesmith left a non-cuda:0 graph unchanged because a one-GPU sandbox exposes its device as cuda:0",
                 stacklevel=2,
             )
             return compiled
@@ -407,8 +401,7 @@ class _Backend:
         graph_key = getattr(compiled, "_fx_graph_cache_key", None)
         if constants and graph_key is None:
             warnings.warn(
-                "Tilesmith left a constant-bearing graph without a stable Inductor "
-                "cache identity unchanged",
+                "Tilesmith left a constant-bearing graph without a stable Inductor cache identity unchanged",
                 stacklevel=2,
             )
             return compiled
@@ -445,53 +438,67 @@ class _LazyKernel:
         self.graph_key = graph_key
         self.settings = settings
         self.installed = None
-        self.lock = threading.Lock()
+        self.lock = threading.Condition()
+        self.installing_thread = None
         self.owner = owner
 
     # __call__ installs exactly one validated artifact, then preserves Inductor's boxed calling convention.
     def __call__(self, inputs):
-        if self.installed is None:
+        """Install once, wait across threads, and use the baseline on recursive entry."""
+        current_thread = threading.get_ident()
+        install = False
+        with self.lock:
+            while self.installed is None and self.installing_thread not in (None, current_thread):
+                self.lock.wait()
+            if self.installed is not None:
+                target = self.installed
+            elif self.installing_thread == current_thread:
+                target = self.baseline
+            else:
+                self.installing_thread = current_thread
+                install = True
+
+        if install:
+            error = None
+            try:
+                target = self._install(inputs)
+            except Exception as caught:
+                error = caught
+                target = self.baseline
+            except BaseException:
+                with self.lock:
+                    self.installing_thread = None
+                    self.lock.notify_all()
+                raise
+
+            # Publish the callable before warning so warning promotion cannot repeat paid work.
             with self.lock:
-                if self.installed is None:
-                    try:
-                        self.installed = self._install(inputs)
-                    except Exception as error:
-                        warnings.warn(
-                            "Tilesmith optimization failed; using ordinary Inductor: "
-                            f"{_summarize(error)}",
-                            stacklevel=2,
-                        )
-                        self.installed = self.baseline
-                # Remove this lazy dispatcher from every call after installation.
+                self.installed = target
+                self.installing_thread = None
                 if self.owner is not None:
-                    self.owner.current_callable = self.installed
+                    self.owner.current_callable = target
                     self.owner = None
-        return self.installed(inputs)
+                self.lock.notify_all()
+            if error is not None:
+                warnings.warn(
+                    f"Tilesmith optimization failed; using ordinary Inductor: {_summarize(error)}",
+                    stacklevel=2,
+                )
+        return target(inputs)
 
     # _install reuses a validated cache entry or runs the complete agent loop against these runtime inputs.
     def _install(self, inputs):
         import torch
 
-        cuda_inputs = [
-            value
-            for value in inputs
-            if torch.is_tensor(value) and value.device.type == "cuda"
-        ]
+        cuda_inputs = [value for value in inputs if torch.is_tensor(value) and value.device.type == "cuda"]
         if not cuda_inputs:
             return self.baseline
         device = cuda_inputs[0].device
         if self.settings.compute is not None:
-            index = (
-                device.index
-                if device.index is not None
-                else torch.cuda.current_device()
-            )
+            index = device.index if device.index is not None else torch.cuda.current_device()
             device_name = torch.cuda.get_device_name(index)
             if not chip_matches(self.settings.compute.chip, device_name):
-                raise RuntimeError(
-                    f"sandbox chip {self.settings.compute.chip!r} does not match "
-                    f"execution device {device_name!r}"
-                )
+                raise RuntimeError(f"sandbox chip {self.settings.compute.chip!r} does not match execution device {device_name!r}")
         skills = _load_skills(self.settings.skills)
         cache_key = _cache_key(
             self.source,
@@ -508,12 +515,11 @@ class _LazyKernel:
             cached = _read_cache(self.settings.cache_dir, cache_key)
             if cached is None:
                 _wait_for_model(self.settings.model)
-                with OPTIMIZE_LOCK, _preserve_rng():
+                optimize_lock = OPTIMIZE_LOCK if self.settings.compute is None else contextlib.nullcontext()
+                with optimize_lock, _preserve_rng():
                     # Remote evaluation acquires a sandbox; local evaluation needs no resource scope.
                     if self.settings.compute is not None:
-                        evaluator_scope = _ComputeEvaluator(
-                            self.source, self.constants, inputs, self.settings
-                        )
+                        evaluator_scope = _ComputeEvaluator(self.source, self.constants, inputs, self.settings)
                     else:
                         evaluator_scope = contextlib.closing(
                             _Evaluator(
@@ -535,6 +541,24 @@ class _LazyKernel:
                             ),
                             skills,
                         )
+                if self.settings.compute is not None:
+                    # The agent can rewrite its remote workbench, so installation needs a local gate.
+                    with (
+                        OPTIMIZE_LOCK,
+                        contextlib.closing(
+                            _Evaluator(
+                                self.baseline,
+                                self.constants,
+                                inputs,
+                                device,
+                            )
+                        ) as trusted_evaluator,
+                    ):
+                        for label in ("local acceptance", "local confirmation"):
+                            report = trusted_evaluator.evaluate(result.source)
+                            score = _report_score(report, label)
+                            if 1 - score < self.settings.min_improvement:
+                                raise RuntimeError(f"{label} did not confirm the required {self.settings.min_improvement:.1%} speedup")
                 cached = _write_cache(
                     self.settings.cache_dir,
                     cache_key,
@@ -545,11 +569,11 @@ class _LazyKernel:
                     self.settings.cache_dir,
                     self.settings.run_id,
                     cache_key,
-                    cached,
+                    cached.path,
                 )
-        if cached.read_text(encoding="utf-8") == self.source:
+        if cached.source.decode("utf-8") == self.source:
             return self.baseline
-        return _load_call(cached, self.constants)
+        return _load_call_bytes(cached.source, self.constants)
 
 
 # _canonical_source removes PyTorch's incrementing, non-executable AOT ID comment.
@@ -563,16 +587,8 @@ def _canonical_source(source):
 # _with_reference places the current FX/PyTorch program above executable generated source as comments.
 def _with_reference(reference, source):
     source = _canonical_source(source)
-    commented = "\n".join(
-        f"# {line}" if line else "#" for line in reference.splitlines()
-    )
-    return (
-        f"{REFERENCE_START}\n"
-        "# Captured from graph_module.code for this compiled graph.\n"
-        f"{commented}\n"
-        f"{REFERENCE_END}\n\n"
-        f"{source}"
-    )
+    commented = "\n".join(f"# {line}" if line else "#" for line in reference.splitlines())
+    return f"{REFERENCE_START}\n# Captured from graph_module.code for this compiled graph.\n{commented}\n{REFERENCE_END}\n\n{source}"
 
 
 # _split_reference separates Tilesmith's trusted comment header from executable candidate source.
@@ -616,6 +632,9 @@ def _cache_key(source, settings, device, graph_key, skills):
         "max_model_calls": settings.max_model_calls,
         "min_improvement": settings.min_improvement,
         "model": settings.model,
+        "python": platform.python_version(),
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
         "compute": (
             {
                 "chip": settings.compute.chip,
@@ -663,7 +682,6 @@ def _cache_lock(path):
 
 def _artifact_paths(cache_dir, cache_key):
     """Return the shared artifact and manifest locations for one compile identity."""
-
     return (
         cache_dir / "artifacts" / f"{cache_key}.py",
         cache_dir / "manifests" / f"{cache_key}.json",
@@ -672,13 +690,11 @@ def _artifact_paths(cache_dir, cache_key):
 
 def _run_graph_directory(cache_dir, run_id, cache_key):
     """Keep one compile invocation's graph evidence separate from shared artifacts."""
-
     return cache_dir / "runs" / run_id / cache_key
 
 
 def _record_cache_hit(cache_dir, run_id, cache_key, artifact):
     """Record that one graph reused an accepted artifact without inventing agent traces."""
-
     directory = _run_graph_directory(cache_dir, run_id, cache_key)
     directory.mkdir(parents=True, exist_ok=True)
     record = {
@@ -710,33 +726,37 @@ def _preserve_rng():
 def _read_cache(cache_dir, cache_key):
     artifact, manifest = _artifact_paths(cache_dir, cache_key)
     try:
+        artifact_stat = artifact.lstat()
+        manifest_stat = manifest.lstat()
+        if not stat.S_ISREG(artifact_stat.st_mode) or not stat.S_ISREG(manifest_stat.st_mode):
+            return None
+        if artifact_stat.st_size > MAX_SOURCE_BYTES or manifest_stat.st_size > 4_096:
+            return None
         metadata = json.loads(manifest.read_text(encoding="utf-8"))
         source = artifact.read_bytes()
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        source.decode("utf-8")
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeError):
         return None
-    if metadata != {
-        "cache_key": cache_key,
-        "sha256": hashlib.sha256(source).hexdigest(),
-    }:
+    source_hash = hashlib.sha256(source).hexdigest()
+    if metadata != {"cache_key": cache_key, "sha256": source_hash}:
         return None
-    return artifact
+    return _CachedSource(artifact, source)
 
 
 # _write_cache syntax-checks the final candidate and atomically publishes source before its manifest.
 def _write_cache(cache_dir, cache_key, source):
+    source_bytes = source.encode()
+    if len(source_bytes) > MAX_SOURCE_BYTES:
+        raise ValueError("candidate source exceeds 64 MiB")
     builtins.compile(source, f"tilesmith-cache-{cache_key}.py", "exec")
     artifact, manifest = _artifact_paths(cache_dir, cache_key)
     artifact.parent.mkdir(parents=True, exist_ok=True)
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    source_hash = hashlib.sha256(source.encode()).hexdigest()
-    with tempfile.NamedTemporaryFile(
-        "w", dir=cache_dir, suffix=".py", delete=False
-    ) as source_file:
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    with tempfile.NamedTemporaryFile("w", dir=cache_dir, suffix=".py", delete=False) as source_file:
         source_file.write(source)
         source_temp = Path(source_file.name)
-    with tempfile.NamedTemporaryFile(
-        "w", dir=cache_dir, suffix=".json", delete=False
-    ) as manifest_file:
+    with tempfile.NamedTemporaryFile("w", dir=cache_dir, suffix=".json", delete=False) as manifest_file:
         json.dump(
             {"cache_key": cache_key, "sha256": source_hash},
             manifest_file,
@@ -745,7 +765,7 @@ def _write_cache(cache_dir, cache_key, source):
         manifest_temp = Path(manifest_file.name)
     os.replace(source_temp, artifact)
     os.replace(manifest_temp, manifest)
-    return artifact
+    return _CachedSource(artifact, source_bytes)
 
 
 # _load_call imports accepted source with Inductor constants and an optional precomputed cache key.
@@ -758,19 +778,22 @@ def _load_call(path, constants, source_hash=None):
     return module.call
 
 
+# _load_call_bytes imports only already-verified bytes through a private temporary path.
+def _load_call_bytes(source, constants):
+    """Load accepted bytes without reopening a mutable shared cache artifact."""
+    from torch._inductor.codecache import code_hash
+
+    with tempfile.TemporaryDirectory(prefix="tilesmith-cache-load-") as directory:
+        path = Path(directory) / "accepted.py"
+        path.write_bytes(source)
+        return _load_call(path, constants, code_hash(source))
+
+
 # _cpu_copy makes remote payloads device-independent while preserving tensor layouts.
 def _cpu_copy(value):
     import torch
 
-    if torch.is_tensor(value):
-        return value.detach().cpu(memory_format=torch.preserve_format)
-    if isinstance(value, tuple):
-        return tuple(_cpu_copy(item) for item in value)
-    if isinstance(value, list):
-        return [_cpu_copy(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _cpu_copy(item) for key, item in value.items()}
-    return value
+    return clone_tensor_graph(torch, value, map_location="cpu")
 
 
 class _Evaluator:
@@ -784,13 +807,9 @@ class _Evaluator:
         self.inputs = tuple(inputs)
         self.directory = tempfile.TemporaryDirectory(prefix="tilesmith-evaluator-")
         self.lock = threading.Lock()
-        index = (
-            device.index if device.index is not None else torch.cuda.current_device()
-        )
+        index = device.index if device.index is not None else torch.cuda.current_device()
         capability = torch.cuda.get_device_capability(index)
-        self.chip = (
-            f"{torch.cuda.get_device_name(index)} (sm_{capability[0]}{capability[1]})"
-        )
+        self.chip = f"{torch.cuda.get_device_name(index)} (sm_{capability[0]}{capability[1]})"
         self.execution = "the calling process on its local NVIDIA GPU"
 
     # evaluate rejects incorrect source before returning an interleaved CUDA-event comparison.
@@ -801,18 +820,16 @@ class _Evaluator:
         source_bytes = source.encode()
         if len(source_bytes) > MAX_SOURCE_BYTES:
             raise ValueError("candidate source exceeds 64 MiB")
-        source_hash = code_hash(source_bytes)
+        # A fresh module keeps confirmation from inheriting candidate globals or constants.
+        source_hash = code_hash(source_bytes + uuid.uuid4().bytes)
         candidate_path = Path(self.directory.name) / f"{source_hash}.py"
         if not candidate_path.exists():
             candidate_path.write_text(source, encoding="utf-8")
-        with self.lock, torch.cuda.device(self.device), torch.no_grad():
-            candidate = _load_call(candidate_path, self.constants, source_hash)
-            assert_candidate_matches(
-                torch,
-                self.baseline,
-                candidate,
-                self.inputs,
-            )
+        with self.lock, torch.cuda.device(self.device), torch.no_grad(), _preserve_rng():
+            candidate_constants = clone_tensor_graph(torch, self.constants)
+            constant_snapshot = clone_tensor_graph(torch, candidate_constants)
+            candidate = _load_call(candidate_path, candidate_constants, source_hash)
+            assert_candidate_matches(torch, self.baseline, candidate, self.inputs)
             torch.cuda.synchronize(self.device)
             inputs = variant_inputs(torch, self.inputs, "normal")
             report = benchmark_pair(
@@ -824,6 +841,19 @@ class _Evaluator:
                 WARMUP,
                 BENCH_ITERATIONS,
                 BENCH_SAMPLES,
+            )
+            assert_candidate_matches(torch, self.baseline, candidate, self.inputs)
+            assert_tensor_graph_matches(
+                torch,
+                candidate_constants,
+                constant_snapshot,
+                "candidate constants",
+            )
+            assert_tensor_aliases_match(
+                torch,
+                candidate_constants,
+                constant_snapshot,
+                "candidate constants",
             )
             report["chip"] = self.chip
             report["reference"] = "torch_inductor_generated"
@@ -896,13 +926,10 @@ class _ComputeSandbox:
                 file=sys.stderr,
                 flush=True,
             )
-            self.runner.run(
-                self.sandbox.wait_until_ready(self.readiness_timeout_ms)
-            )
+            self.runner.run(self.sandbox.wait_until_ready(self.readiness_timeout_ms))
             self._ensure_runtime()
             created = self._command(
-                f"mkdir -p {REMOTE_ROOT}/cache {REMOTE_WORKSPACE}/artifacts "
-                f"{REMOTE_WORKSPACE}/cache",
+                f"mkdir -p {REMOTE_ROOT}/cache {REMOTE_WORKSPACE}/artifacts {REMOTE_WORKSPACE}/cache",
                 timeout_ms=60_000,
             )
             _require_remote_success(created, "sandbox setup")
@@ -936,12 +963,11 @@ class _ComputeSandbox:
 
     # _close awaits exact sandbox destruction before closing the provider bridge and event loop.
     def _close(self, error_info):
+        """Close the sandbox, client, and retained event loop in ownership order."""
         result = False
         try:
             if self.sandbox is not None:
-                result = self.runner.run(
-                    self.sandbox_scope.__aexit__(*error_info)
-                )
+                result = self.runner.run(self.sandbox_scope.__aexit__(*error_info))
         finally:
             try:
                 self.runner.run(self.client.__aexit__(*error_info))
@@ -962,11 +988,7 @@ class _ComputeSandbox:
         )
         _require_remote_success(toolchain, "sandbox Python/uv/compiler preflight")
 
-        expected = {
-            package: str(version)
-            for package, version in self.versions.items()
-            if package in {"torch", "triton"}
-        }
+        expected = {package: str(version) for package, version in self.versions.items() if package in {"torch", "triton"}}
         script = (
             "import json, numpy, sys, torch, triton; "
             f"expected = json.loads({json.dumps(json.dumps(expected))}); "
@@ -982,11 +1004,7 @@ class _ComputeSandbox:
         check = self._command(check_command, timeout_ms=60_000)
         if check.exit_code != 0:
             torch_version = expected.get("torch")
-            torch_package = (
-                "torch"
-                if torch_version is None
-                else f"torch=={torch_version.split('+', 1)[0]}"
-            )
+            torch_package = "torch" if torch_version is None else f"torch=={torch_version.split('+', 1)[0]}"
             packages = [torch_package]
             packages.append("numpy")
             triton_version = expected.get("triton")
@@ -997,9 +1015,7 @@ class _ComputeSandbox:
                 file=sys.stderr,
                 flush=True,
             )
-            install_command = shlex.join(
-                ["uv", "pip", "install", "--system", "--upgrade", *packages]
-            )
+            install_command = shlex.join(["uv", "pip", "install", "--system", "--upgrade", *packages])
             install = self._command(
                 install_command,
                 timeout_ms=self.command_timeout_ms,
@@ -1044,8 +1060,10 @@ class _ComputeSandbox:
 
     # run executes one worker action and returns its final JSON object.
     def run(self, action, timeout_ms=None):
+        """Run one trusted worker action after invalidating its prior report."""
         if timeout_ms is None:
             timeout_ms = self.command_timeout_ms
+        self.write_text("result.json", "")
         command = shlex.join(["python3", f"{REMOTE_ROOT}/worker.py", action])
         result = self._command(
             command,
@@ -1097,9 +1115,7 @@ def _require_remote_success(result, operation):
     if result.exit_code == 0:
         return
     details = (result.stderr or result.stdout).strip()[-4_000:]
-    raise RuntimeError(
-        f"{operation} failed with exit code {result.exit_code}: {details}"
-    )
+    raise RuntimeError(f"{operation} failed with exit code {result.exit_code}: {details}")
 
 
 class _ComputeEvaluator:
@@ -1233,20 +1249,14 @@ class _AttemptWorkspace:
         self.directory = Path(directory)
         self.attempts = self.directory / "attempts"
         self.baseline = source
-        self.paths = [
-            self.attempts / f"attempt_{index:02d}.py" for index in range(ATTEMPT_FILES)
-        ]
+        self.paths = [self.attempts / f"attempt_{index:02d}.py" for index in range(ATTEMPT_FILES)]
         self.header, _ = _split_reference(source)
         if not self.header:
             raise ValueError("agent source is missing its PyTorch FX reference header")
 
         self.attempts.mkdir(parents=True, exist_ok=True)
         existing = [path for path in self.paths if path.is_file()]
-        latest = (
-            max(existing, key=lambda path: path.stat().st_mtime_ns)
-            if existing
-            else self.paths[0]
-        )
+        latest = max(existing, key=lambda path: path.stat().st_mtime_ns) if existing else self.paths[0]
         for path in self.paths:
             if not path.exists():
                 path.write_text(source, encoding="utf-8")
@@ -1256,11 +1266,11 @@ class _AttemptWorkspace:
 
     # prepare_next copies the latest attempt into the next slot and rotates after attempt_04.
     def prepare_next(self):
-        source = self.latest.read_text(encoding="utf-8")
+        source = self._read_source(self.latest)
         source = self._annotate(source)
         latest_index = self.paths.index(self.latest)
         if latest_index == ATTEMPT_FILES - 1:
-            contents = [path.read_text(encoding="utf-8") for path in self.paths[1:]]
+            contents = [self._read_source(path) for path in self.paths[1:]]
             for path, content in zip(self.paths[:-1], contents, strict=True):
                 path.write_text(self._annotate(content), encoding="utf-8")
             next_path = self.paths[-1]
@@ -1279,7 +1289,7 @@ class _AttemptWorkspace:
             raise ValueError(f"path must be one of: {names}")
         candidate = allowed[normalized]
         stat = candidate.stat()
-        original = candidate.read_text(encoding="utf-8")
+        original = self._read_source(candidate)
         source = self._annotate(original)
         if source != original:
             candidate.write_text(source, encoding="utf-8")
@@ -1288,7 +1298,7 @@ class _AttemptWorkspace:
 
     # read_latest returns the normalized source currently shared with the GPU shell.
     def read_latest(self):
-        source = self.latest.read_text(encoding="utf-8")
+        source = self._read_source(self.latest)
         return self._annotate(source)
 
     # write_latest accepts a GPU-shell edit while preserving the trusted FX reference.
@@ -1300,17 +1310,13 @@ class _AttemptWorkspace:
     # normalize_all repairs comment headers without changing which attempt is newest.
     def normalize_all(self):
         self.attempts.mkdir(parents=True, exist_ok=True)
-        fallback = (
-            self.latest.read_text(encoding="utf-8")
-            if self.latest.is_file()
-            else self.baseline
-        )
+        fallback = self._read_source(self.latest) if self.latest.is_file() else self.baseline
         for path in self.paths:
             if not path.exists():
                 path.write_text(self._annotate(fallback), encoding="utf-8")
                 continue
             stat = path.stat()
-            source = path.read_text(encoding="utf-8")
+            source = self._read_source(path)
             annotated = self._annotate(source)
             if annotated != source:
                 path.write_text(annotated, encoding="utf-8")
@@ -1334,6 +1340,13 @@ class _AttemptWorkspace:
             return source
         _, body = _split_reference(source)
         return f"{self.header}{body}"
+
+    # _read_source rejects oversized model edits before allocating their contents.
+    def _read_source(self, path):
+        """Read one managed candidate within the shared source-size limit."""
+        if path.stat().st_size > MAX_SOURCE_BYTES:
+            raise ValueError("candidate source exceeds 64 MiB")
+        return path.read_text(encoding="utf-8")
 
     # _virtual returns the stable path exposed by Deep Agents' virtual filesystem.
     def _virtual(self, path):
@@ -1469,9 +1482,7 @@ class _BenchmarkTrack:
                     },
                 )
 
-            confirmed_gain = (
-                self.baseline_score - confirmed_score
-            ) / self.baseline_score
+            confirmed_gain = (self.baseline_score - confirmed_score) / self.baseline_score
             if confirmed_gain < self.min_improvement:
                 return self._record(
                     source_hash,
@@ -1505,10 +1516,7 @@ class _BenchmarkTrack:
                     "correct": True,
                     "current_best_score": self.best_score,
                     "improvement_vs_baseline": confirmed_gain,
-                    "improvement_vs_best": (
-                        previous_best - confirmed_score
-                    )
-                    / previous_best,
+                    "improvement_vs_best": (previous_best - confirmed_score) / previous_best,
                     "lower_is_better": True,
                     "minimum_improvement": self.min_improvement,
                     "progress": self._progress("loop_complete"),
@@ -1530,6 +1538,8 @@ def _load_skills(configured_paths):
             path = path / "SKILL.md"
         if not path.is_file():
             raise ValueError(f"agent skill is not a regular file: {path}")
+        if path.stat().st_size > MAX_SKILL_BYTES - total:
+            raise ValueError(f"agent skill context exceeds {MAX_SKILL_BYTES} bytes")
         contents = path.read_text(encoding="utf-8")
         total += len(contents.encode())
         if total > MAX_SKILL_BYTES:
@@ -1540,11 +1550,7 @@ def _load_skills(configured_paths):
 
 # _agent_instructions joins trusted guidance with the evaluator's actual GPU placement.
 def _agent_instructions(settings, evaluator, skills):
-    model_budget = (
-        "unlimited model calls"
-        if settings.max_model_calls is None
-        else f"at most {settings.max_model_calls} model calls"
-    )
+    model_budget = "unlimited model calls" if settings.max_model_calls is None else f"at most {settings.max_model_calls} model calls"
     sections = [
         AGENT_PROMPT,
         AGENCY_PROMPTS[settings.agency],
@@ -1567,11 +1573,7 @@ def _agent_instructions(settings, evaluator, skills):
     if shell_help:
         sections.append(f"GPU workspace:\n{shell_help}")
     for path, contents in skills:
-        sections.append(
-            f"--- TRUSTED SKILL START: {path} ---\n"
-            f"{contents}\n"
-            "--- TRUSTED SKILL END ---"
-        )
+        sections.append(f"--- TRUSTED SKILL START: {path} ---\n{contents}\n--- TRUSTED SKILL END ---")
     return "\n\n".join(sections)
 
 
@@ -1584,10 +1586,7 @@ def _model_connection():
         api_key = os.environ.get("OPENROUTER_API_KEY")
         base_url = "https://openrouter.ai/api/v1"
     if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY or OPENROUTER_API_KEY is required to run the "
-            "Tilesmith agent"
-        )
+        raise RuntimeError("OPENAI_API_KEY or OPENROUTER_API_KEY is required to run the Tilesmith agent")
     return api_key, base_url
 
 
@@ -1600,7 +1599,7 @@ def _wait_for_model(model, timeout_seconds=60):
     with OpenAI(
         api_key=api_key,
         base_url=base_url or None,
-        max_retries=0,
+        max_retries=6,
         timeout=10,
     ) as client:
         deadline = time.monotonic() + timeout_seconds
@@ -1619,8 +1618,7 @@ def _wait_for_model(model, timeout_seconds=60):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError(
-                    f"model {model!r} did not become ready within {timeout_seconds:g} "
-                    f"seconds: {_summarize(last_error)}"
+                    f"model {model!r} did not become ready within {timeout_seconds:g} seconds: {_summarize(last_error)}"
                 ) from last_error
             time.sleep(min(2, remaining))
 
@@ -1630,16 +1628,14 @@ def _chat_model(settings):
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as error:
-        raise RuntimeError(
-            "Tilesmith requires deepagents and langchain-openai"
-        ) from error
+        raise RuntimeError("Tilesmith requires deepagents and langchain-openai") from error
 
     api_key, base_url = _model_connection()
     return ChatOpenAI(
         api_key=api_key,
         base_url=base_url,
         include=["reasoning.encrypted_content"],
-        max_retries=6,
+        max_retries=0,
         model=settings.model,
         store=False,
         timeout=settings.timeout,
@@ -1649,12 +1645,9 @@ def _chat_model(settings):
 
 # _run_agent executes one permissive Deep Agents graph and installs only a freshly confirmed win.
 def _run_agent(source, settings, evaluator, workspace_dir, skills):
+    """Run an agent track and return only a confirmed improvement."""
     baseline_factory = getattr(evaluator, "baseline_report", None)
-    baseline_report = (
-        baseline_factory()
-        if baseline_factory is not None
-        else evaluator.evaluate(source)
-    )
+    baseline_report = baseline_factory() if baseline_factory is not None else evaluator.evaluate(source)
     track = _BenchmarkTrack(
         source,
         baseline_report,
@@ -1674,9 +1667,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
         from langgraph.checkpoint.memory import MemorySaver
         from langgraph.graph import END, START, StateGraph
     except ImportError as error:
-        raise RuntimeError(
-            "Tilesmith requires deepagents and langchain-openai"
-        ) from error
+        raise RuntimeError("Tilesmith requires deepagents and langchain-openai") from error
 
     workspace = _AttemptWorkspace(workspace_dir, source)
     workspace.write_report("baseline", baseline_report)
@@ -1739,7 +1730,6 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
         line_count: int = 200,
     ) -> str:
         """Read exact attempt text without line numbers or display padding."""
-
         if start_line < 1:
             raise ValueError("start_line must be at least 1")
         if not 1 <= line_count <= 1_000:
@@ -1756,7 +1746,6 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
         @tool
         def gpu_shell(command: str, timeout_seconds: int = 300) -> str:
             """Run any shell command in the persistent target GPU sandbox."""
-
             try:
                 report = shell(command, workspace, timeout_seconds)
             except Exception as error:
@@ -1778,6 +1767,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
 
     # optimize_loop lets the agent explore freely, then measures its current file independently.
     def optimize_loop(state):
+        """Run one agent turn, evaluate its attempt, and advance confirmed loops."""
         completed = state["completed"]
         if track.loop != completed:
             track.start_loop(completed)
@@ -1828,9 +1818,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
                             # Keep live traces useful without dumping generated source arguments.
                             if len(arguments) > 1_000:
                                 arguments = f"{arguments[:1_000]}... [truncated]"
-                            rendered_calls.append(
-                                f"{call.get('name', 'tool')}({arguments})"
-                            )
+                            rendered_calls.append(f"{call.get('name', 'tool')}({arguments})")
                         print(f"agent tools: {', '.join(rendered_calls)}", flush=True)
                     elif getattr(message, "type", "") in {"ai", "tool"}:
                         name = getattr(message, "name", None) or message.type
@@ -1842,8 +1830,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
         except ModelCallLimitReached as error:
             limit_error = error
             print(
-                f"agent reached max_model_calls={settings.max_model_calls}; "
-                "checking its current attempt",
+                f"agent reached max_model_calls={settings.max_model_calls}; checking its current attempt",
                 flush=True,
             )
         messages = result.get("messages", [])
@@ -1875,8 +1862,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
         completed += int(track.loop_complete)
         if limit_error is not None and completed < settings.loops:
             raise RuntimeError(
-                f"agent exhausted max_model_calls={settings.max_model_calls} "
-                "before confirming the requested optimization"
+                f"agent exhausted max_model_calls={settings.max_model_calls} before confirming the requested optimization"
             ) from limit_error
         return {
             "completed": completed,
@@ -1887,6 +1873,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
 
     # continue_loops makes the requested measurement count an explicit graph invariant.
     def continue_loops(state):
+        """Stop only after every requested loop has a fresh confirmation."""
         return END if state["completed"] >= settings.loops else "optimize"
 
     loop_builder = StateGraph(_LoopState)
@@ -1913,10 +1900,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
         raise RuntimeError("agent graph ended without a confirmed speedup")
     confirmed_score = track.best_score
     confirmed_gain = (track.baseline_score - confirmed_score) / track.baseline_score
-    print(
-        f"installed {confirmed_gain:.2%} improvement: "
-        f"{track.baseline_score:.6g} -> {confirmed_score:.6g}"
-    )
+    print(f"installed {confirmed_gain:.2%} improvement: {track.baseline_score:.6g} -> {confirmed_score:.6g}")
     return _AgentResult(
         track.best_source,
         track.baseline_score,

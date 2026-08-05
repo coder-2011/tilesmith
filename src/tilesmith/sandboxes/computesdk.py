@@ -11,15 +11,14 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import os
 import re
 import shutil
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import TemporaryFile
 from typing import Literal, Self, cast
+from urllib.parse import quote, quote_plus
 
 COMPUTESDK_COMMIT = "0cf74653ea2d448074054662d90880bc22eb3a4f"
 COMPUTESDK_VERSION = "4.1.4"
@@ -134,11 +133,11 @@ class _Bridge:
         self._redactions = tuple(value for provider in providers for value in _config_strings(provider.config))
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_tail = bytearray()
         self._pending: dict[int, _Pending] = {}
         self._next_id = 1
         self._write_lock = asyncio.Lock()
-        # The bridge owns this file until close(); a pipe could deadlock on noisy provider logs.
-        self._stderr = TemporaryFile(mode="w+b")  # noqa: SIM115
 
     async def start(self) -> tuple[str, ...]:
         """Start npm's pinned package environment and configure provider instances."""
@@ -156,11 +155,15 @@ class _Bridge:
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=self._stderr,
+            stderr=asyncio.subprocess.PIPE,
             # readFile responses contain source or traces in one JSON line.
             limit=_BRIDGE_RESPONSE_LIMIT_BYTES,
         )
         self._reader_task = asyncio.create_task(self._read_responses(), name="tilesmith-computesdk-bridge")
+        self._stderr_task = asyncio.create_task(
+            self._read_stderr(),
+            name="tilesmith-computesdk-stderr",
+        )
         specifications = [{"package": provider.package, "factory": provider.factory, "config": provider.config} for provider in self._providers]
         try:
             result = await self.call(
@@ -200,14 +203,18 @@ class _Bridge:
         request_timeout = self._request_timeout if timeout is None else timeout
         if not math.isfinite(request_timeout) or request_timeout <= 0:
             raise ValueError("ComputeSDK request timeout must be finite and positive")
+        # Provider diagnostics may mention request secrets after their response has completed.
+        self._redactions = tuple(dict.fromkeys((*self._redactions, *redactions)))
         process = self._process
         if process is None or process.stdin is None or process.returncode is not None:
             message = self._process_failure("ComputeSDK bridge is not running")
             raise ComputeSDKError(_redact(message, (*self._redactions, *redactions)))
 
-        request_id = self._next_id
-        self._next_id += 1
         loop = asyncio.get_running_loop()
+        request_id = self._next_id
+        request = {"id": request_id, "action": action, **(payload or {})}
+        encoded = _json_bytes(request) + b"\n"
+        self._next_id += 1
         pending = _Pending(
             future=loop.create_future(),
             redactions=(*self._redactions, *redactions),
@@ -215,14 +222,13 @@ class _Bridge:
             on_stderr=on_stderr,
         )
         self._pending[request_id] = pending
-        request = {"id": request_id, "action": action, **(payload or {})}
-        encoded = _json_bytes(request) + b"\n"
 
         try:
-            async with self._write_lock:
-                process.stdin.write(encoded)
-                await process.stdin.drain()
-            async with asyncio.timeout(request_timeout):
+            deadline = loop.time() + request_timeout
+            async with asyncio.timeout_at(deadline):
+                async with self._write_lock:
+                    process.stdin.write(encoded)
+                    await process.stdin.drain()
                 return await pending.future
         except TimeoutError as error:
             if cancellable:
@@ -240,8 +246,6 @@ class _Bridge:
         """Ask Node to destroy owned sandboxes, then stop the bridge process."""
         process = self._process
         if process is None:
-            if not self._stderr.closed:
-                self._stderr.close()
             return
         close_error: BaseException | None = None
         if process.returncode is None:
@@ -265,7 +269,12 @@ class _Bridge:
             except BaseException as reader_error:
                 if close_error is None:
                     close_error = reader_error
-        self._stderr.close()
+        if self._stderr_task is not None:
+            try:
+                await self._stderr_task
+            except BaseException as stderr_error:
+                if close_error is None:
+                    close_error = stderr_error
         self._process = None
         if close_error is not None:
             raise close_error
@@ -304,7 +313,7 @@ class _Bridge:
                 elif pending.callback_error is not None:
                     pending.future.set_exception(pending.callback_error)
                 else:
-                    pending.future.set_result(data.get("result"))
+                    pending.future.set_result(_redact_value(data.get("result"), pending.redactions))
         except BaseException as error:
             self._fail_pending(error)
             if process.returncode is None:
@@ -315,6 +324,14 @@ class _Bridge:
                 await process.wait()
             self._fail_pending(ComputeSDKError(self._process_failure("ComputeSDK bridge exited")))
 
+    async def _read_stderr(self) -> None:
+        """Drain provider diagnostics into one fixed-size in-memory tail."""
+        process = self._process
+        assert process is not None and process.stderr is not None
+        while chunk := await process.stderr.read(8_192):
+            self._stderr_tail.extend(chunk)
+            del self._stderr_tail[:-8_000]
+
     def _deliver_stream(self, pending: _Pending, event: str, value: object) -> None:
         """Invoke one caller callback while retaining its first failure."""
         if not isinstance(value, str) or pending.callback_error is not None:
@@ -323,7 +340,7 @@ class _Bridge:
         if callback is None:
             return
         try:
-            callback(value)
+            callback(_redact(value, pending.redactions))
         except BaseException as error:
             pending.callback_error = error
 
@@ -337,9 +354,7 @@ class _Bridge:
 
     def _process_failure(self, prefix: str) -> str:
         """Append bounded, secret-redacted Node diagnostics to a bridge failure."""
-        size = os.fstat(self._stderr.fileno()).st_size
-        offset = max(0, size - 8_000)
-        details = os.pread(self._stderr.fileno(), 8_000, offset).decode("utf-8", errors="replace").strip()
+        details = bytes(self._stderr_tail).decode("utf-8", errors="replace").strip()
         message = f"{prefix}: {details}" if details else prefix
         return _redact(message, self._redactions)[:8_000]
 
@@ -375,6 +390,7 @@ class ComputeSDKClient:
         self._start_lock = asyncio.Lock()
         self._provider_names: tuple[str, ...] | None = None
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> Self:
         """Start the TypeScript bridge for an async context."""
@@ -395,7 +411,7 @@ class ComputeSDKClient:
 
     async def start(self) -> tuple[str, ...]:
         """Install the pinned npm packages and return their provider names."""
-        if self._closed:
+        if self._closed or self._close_task is not None:
             raise ComputeSDKError("ComputeSDK client is closed")
         if self._provider_names is not None:
             return self._provider_names
@@ -412,8 +428,20 @@ class ComputeSDKClient:
 
     async def close(self) -> None:
         """Destroy bridge-owned sandboxes and stop Node."""
+        if self._close_task is not None:
+            await asyncio.shield(self._close_task)
+            return
         if self._closed:
             return
+        self._close_task = asyncio.create_task(
+            self._close_bridge(),
+            name="tilesmith-computesdk-close",
+        )
+        await asyncio.shield(self._close_task)
+
+    # _close_bridge performs the one shared client shutdown operation.
+    async def _close_bridge(self) -> None:
+        """Close Node once while every concurrent caller awaits the same task."""
         try:
             await self._bridge.close()
         finally:
@@ -427,7 +455,9 @@ class ComputeSDKClient:
         request_timeout: float | None = None,
     ) -> Sandbox:
         """Create a sandbox through ComputeSDK's configured routing strategy."""
-        await self.start()
+        provider_names = await self.start()
+        if provider is not None and provider not in provider_names:
+            raise ValueError(f"Unknown configured ComputeSDK provider: {provider!r}")
         create_options = dict(options or {})
         if provider is not None:
             create_options["provider"] = provider
@@ -581,6 +611,7 @@ class Sandbox:
         self.provider = provider
         self._bridge = bridge
         self._destroyed = False
+        self._destroy_task: asyncio.Task[None] | None = None
 
     async def run_command(
         self,
@@ -633,10 +664,7 @@ class Sandbox:
             )
         except ComputeSDKError as error:
             seconds = timeout_ms / 1_000
-            raise ComputeSDKError(
-                f"Sandbox did not become command-ready within {seconds:g} "
-                f"seconds: {error}"
-            ) from error
+            raise ComputeSDKError(f"Sandbox did not become command-ready within {seconds:g} seconds: {error}") from error
 
     async def get_info(self) -> SandboxInfo:
         """Return current provider-neutral information about this sandbox."""
@@ -713,6 +741,21 @@ class Sandbox:
         """Destroy this sandbox exactly once through its provider object."""
         if self._destroyed:
             return
+        if self._destroy_task is None:
+            self._destroy_task = asyncio.create_task(
+                self._destroy_once(),
+                name=f"tilesmith-destroy-{self.sandbox_id}",
+            )
+        task = self._destroy_task
+        try:
+            await asyncio.shield(task)
+        finally:
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                self._destroy_task = None
+
+    # _destroy_once keeps teardown running after a caller cancellation.
+    async def _destroy_once(self) -> None:
+        """Dispatch one provider teardown and publish completion afterward."""
         await self._bridge.call("sandboxDestroy", {"sandboxId": self.sandbox_id})
         self._destroyed = True
 
@@ -726,7 +769,7 @@ def _json_bytes(value: object) -> bytes:
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode("utf-8")
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, UnicodeError) as error:
         raise ValueError(f"ComputeSDK values must be JSON serializable: {error}") from error
 
 
@@ -753,10 +796,23 @@ def _mapping_values(value: object) -> tuple[str, ...]:
 
 def _redact(message: str, secrets: Sequence[str]) -> str:
     """Replace secrets longest-first so overlapping values cannot expose suffixes."""
-    ordered = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+    variants = {variant for secret in secrets if secret for variant in (secret, quote(secret, safe=""), quote_plus(secret))}
+    ordered = sorted(variants, key=len, reverse=True)
     for secret in ordered:
         message = message.replace(secret, "[REDACTED]")
     return message
+
+
+# _redact_value removes known secrets from every string in a returned JSON value.
+def _redact_value(value: object, secrets: Sequence[str]) -> object:
+    """Recursively redact successful responses as well as failures and streams."""
+    if isinstance(value, str):
+        return _redact(value, secrets)
+    if isinstance(value, list):
+        return [_redact_value(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {_redact(key, secrets): _redact_value(item, secrets) for key, item in value.items()}
+    return value
 
 
 def _nonempty(value: str, name: str) -> str:

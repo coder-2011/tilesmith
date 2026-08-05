@@ -1,3 +1,5 @@
+"""Run the opt-in end-to-end Tilesmith GPU benchmark."""
+
 import argparse
 import hashlib
 import json
@@ -13,12 +15,11 @@ from tilesmith import (
     _load_skills,
     _read_compute_config,
     _read_settings,
-    _run_gpu_shell,
     _run_agent,
+    _run_gpu_shell,
     _wait_for_model,
     _with_reference,
 )
-
 
 ROOT = Path(__file__).resolve().parent
 
@@ -26,15 +27,9 @@ ROOT = Path(__file__).resolve().parent
 # _slow_fixture repeats one pure generated launch to create a correct, obvious smoke-test win.
 def _slow_fixture(source, launches):
     lines = source.splitlines(keepends=True)
-    launch_lines = [
-        index
-        for index, line in enumerate(lines)
-        if line.lstrip().startswith("triton_") and ".run(" in line
-    ]
+    launch_lines = [index for index, line in enumerate(lines) if line.lstrip().startswith("triton_") and ".run(" in line]
     if len(launch_lines) != 1:
-        raise RuntimeError(
-            f"expected one generated Triton launch, found {len(launch_lines)}"
-        )
+        raise RuntimeError(f"expected one generated Triton launch, found {len(launch_lines)}")
     index = launch_lines[0]
     lines[index : index + 1] = [lines[index]] * launches
     return "".join(lines)
@@ -73,10 +68,7 @@ class _FixtureEvaluator:
 def _run(args):
     if args.launches < 2:
         raise ValueError("--launches must be at least 2")
-    if (
-        not math.isfinite(args.expected_improvement)
-        or not 0 <= args.expected_improvement < 1
-    ):
+    if not math.isfinite(args.expected_improvement) or not 0 <= args.expected_improvement < 1:
         raise ValueError("--expected-improvement must be in [0, 1)")
     if not args.chip.strip():
         raise ValueError("--chip must not be empty")
@@ -119,18 +111,13 @@ def _run(args):
     if evaluator.shell_calls < 1:
         raise RuntimeError("agent did not use the GPU shell")
     if result.benchmarks != args.loops:
-        raise RuntimeError(
-            f"graph completed {result.benchmarks} benchmarks for {args.loops} loops"
-        )
+        raise RuntimeError(f"graph completed {result.benchmarks} benchmarks for {args.loops} loops")
     if result.source == baseline_source:
         raise RuntimeError("agent did not catch the controlled optimization")
 
     gain = (result.baseline_score - result.confirmed_score) / result.baseline_score
     if gain < args.expected_improvement:
-        raise RuntimeError(
-            f"measured gain {gain:.1%} is below required "
-            f"{args.expected_improvement:.1%}"
-        )
+        raise RuntimeError(f"measured gain {gain:.1%} is below required {args.expected_improvement:.1%}")
     print(
         json.dumps(
             {
@@ -149,22 +136,16 @@ def _run(args):
 
 # _parse_args keeps the paid ComputeSDK benchmark explicit and configurable.
 def _parse_args():
-    parser = argparse.ArgumentParser(
-        description="Run the opt-in Tilesmith GPU agent benchmark"
-    )
+    parser = argparse.ArgumentParser(description="Run the opt-in Tilesmith GPU agent benchmark")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = commands.add_parser(
-        "run", help="run the complete Deep Agents benchmark"
-    )
+    run_parser = commands.add_parser("run", help="run the complete Deep Agents benchmark")
     run_parser.add_argument("--loops", type=int, default=1)
     run_parser.add_argument("--max-model-calls", type=int)
     run_parser.add_argument("--chip", default="L4")
     run_parser.add_argument("--expected-improvement", type=float, default=0.25)
     run_parser.add_argument("--launches", type=int, default=4)
-    run_parser.add_argument(
-        "--model", default=os.environ.get("TILESMITH_MODEL", "gpt-5.5")
-    )
+    run_parser.add_argument("--model", default=os.environ.get("TILESMITH_MODEL", "gpt-5.5"))
     run_parser.add_argument(
         "--skill",
         action="append",
@@ -175,6 +156,7 @@ def _parse_args():
 
 # main runs the explicit paid benchmark command.
 def main():
+    """Run the selected paid benchmark command."""
     _run(_parse_args())
 
 
