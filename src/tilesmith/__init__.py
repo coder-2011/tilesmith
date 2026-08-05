@@ -12,8 +12,12 @@ import json
 import math
 import os
 import platform
+import secrets
 import shlex
+import shutil
+import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -104,6 +108,18 @@ You may redesign the generated implementation when evidence supports it: rewrite
 
 
 @dataclass(frozen=True)
+class Benchmark:
+    """Report the accepted per-graph timing against ordinary TorchInductor."""
+
+    cache_key: str
+    chip: str
+    torch_inductor_ms: float
+    tilesmith_ms: float
+    speedup: float
+    cached: bool
+
+
+@dataclass(frozen=True)
 class _ComputeConfig:
     """Hold one resolved ComputeSDK placement request."""
 
@@ -145,6 +161,7 @@ class _AgentResult:
     confirmed_score: float
     benchmarks: int
     model_calls: int
+    report: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -153,6 +170,7 @@ class _CachedSource:
 
     path: Path
     source: bytes
+    benchmark: Benchmark | None
 
 
 class _LoopState(TypedDict):
@@ -164,31 +182,52 @@ class _LoopState(TypedDict):
     turn: int
 
 
+# benchmarks snapshots all completed graph timings attached by compile.
+def benchmarks(compiled):
+    """Return immutable per-graph results after the compiled callable has run."""
+    try:
+        results = compiled._tilesmith_benchmarks
+    except AttributeError as error:
+        raise TypeError("compiled callable was not created by tilesmith.compile") from error
+    return tuple(results)
+
+
 # compile returns a normal torch.compile callable while routing Inductor graphs through Tilesmith.
 def compile(
     model,
     *,
-    example_inputs,
+    example_inputs=None,
     fullgraph=False,
     dynamic=None,
     mode=None,
     options=None,
     agency="medium",
+    agent_model=None,
     loops=1,
     max_model_calls=None,
     sandbox=None,
     chip=None,
 ):
-    """Compile a CUDA model and lazily install only a confirmed optimization."""
+    """Compile with Tilesmith only when its agent configuration is complete."""
+    import torch
+
+    agent_model = _resolve_agent_model(agent_model)
+    if example_inputs is None or agent_model is None or not _agent_is_configured():
+        return torch.compile(
+            model,
+            fullgraph=fullgraph,
+            dynamic=dynamic,
+            mode=mode,
+            options=options,
+        )
     if sandbox not in (None, "computesdk"):
         raise ValueError("sandbox must be None or 'computesdk'")
     if sandbox is None and chip is not None:
         raise ValueError("chip is only valid when sandbox is set")
     if sandbox == "computesdk" and (not isinstance(chip, str) or not chip.strip()):
         raise ValueError("sandbox='computesdk' requires a non-empty chip")
-    settings = _read_settings(sandbox, chip or "", loops, max_model_calls, agency)
+    settings = _read_settings(sandbox, chip or "", loops, max_model_calls, agency, agent_model)
 
-    import torch
     from torch._inductor.compile_fx import compile_fx
 
     if not callable(model):
@@ -208,18 +247,21 @@ def compile(
     if "inner_compile" not in inspect.signature(compile_fx).parameters:
         raise RuntimeError("this PyTorch version does not expose Inductor's inner_compile hook")
 
-    return torch.compile(
+    backend = _Backend(settings, dynamic)
+    compiled = torch.compile(
         model,
-        backend=_Backend(settings, dynamic),
+        backend=backend,
         fullgraph=fullgraph,
         dynamic=dynamic,
         mode=mode,
         options=options,
     )
+    compiled._tilesmith_benchmarks = backend.benchmark_results
+    return compiled
 
 
 # _read_settings keeps the public API small while making expensive agent choices explicit in the environment.
-def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"):
+def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium", agent_model=None):
     min_improvement = float(os.environ.get("TILESMITH_MIN_IMPROVEMENT", "0.02"))
     timeout = float(os.environ.get("TILESMITH_TIMEOUT", "1200"))
     if isinstance(loops, bool) or not isinstance(loops, int) or loops < 1:
@@ -241,12 +283,31 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
         loops=loops,
         max_model_calls=max_model_calls,
         min_improvement=min_improvement,
-        model=os.environ.get("TILESMITH_MODEL", "gpt-5.5"),
+        model=_resolve_agent_model(agent_model) or "gpt-5.5",
         run_id=uuid.uuid4().hex,
         skills=tuple(_default_skills()),
         timeout=timeout,
         debug=os.environ.get("TILESMITH_DEBUG") == "1",
     )
+
+
+# _resolve_agent_model gives the compile argument precedence over the optional environment default.
+def _resolve_agent_model(agent_model):
+    """Return one non-empty agent model, or None when optimization is not configured."""
+    if agent_model is None:
+        agent_model = os.environ.get("TILESMITH_MODEL")
+    if agent_model is None:
+        return None
+    if not isinstance(agent_model, str) or not agent_model.strip():
+        raise ValueError("agent_model and TILESMITH_MODEL must be non-empty strings")
+    return agent_model.strip()
+
+
+# _agent_is_configured checks for a usable API key or externally owned Codex login without starting either route.
+def _agent_is_configured():
+    """Return whether a supported model connection has enough local configuration to start."""
+    api_key, _ = _api_key_connection()
+    return api_key is not None or _codex_login_installation() is not None
 
 
 # _read_compute_config validates a direct provider before provisioning a billable sandbox.
@@ -314,6 +375,7 @@ class _Backend:
     def __init__(self, settings, dynamic=None):
         self.settings = settings
         self.dynamic = dynamic
+        self.benchmark_results = []
 
     # __call__ gives Dynamo's graph to Inductor while keeping the interception path cache-visible.
     def __call__(self, graph_module, example_inputs, mode=None, options=None):
@@ -400,6 +462,7 @@ class _Backend:
             self.settings,
             graph_key or compiled.cache_key,
             owner=compiled,
+            benchmark_results=self.benchmark_results,
         )
         return compiled
 
@@ -418,7 +481,7 @@ def _is_raw_generated_call(compiled):
 
 class _LazyKernel:
     # __init__ defers optimization until real runtime tensors are available for validation and timing.
-    def __init__(self, baseline, source, constants, settings, graph_key, owner=None):
+    def __init__(self, baseline, source, constants, settings, graph_key, owner=None, benchmark_results=None):
         self.baseline = baseline
         self.source = _canonical_source(source)
         self.constants = constants
@@ -428,6 +491,7 @@ class _LazyKernel:
         self.lock = threading.Condition()
         self.installing_thread = None
         self.owner = owner
+        self.benchmark_results = benchmark_results
         self.pid = os.getpid()
 
     # __call__ installs exactly one validated artifact, then preserves Inductor's boxed calling convention.
@@ -514,9 +578,14 @@ class _LazyKernel:
                     cache_key,
                     cached.path,
                 )
-            if cached.source.decode("utf-8") == self.source:
-                return self.baseline
-            return _load_call_bytes(cached.source, self.constants)
+            # Load successfully before publishing the measurement to the caller.
+            if cached.source.decode("utf-8") == self.source:  # noqa: SIM108
+                target = self.baseline
+            else:
+                target = _load_call_bytes(cached.source, self.constants)
+            if cached.benchmark is not None and self.benchmark_results is not None:
+                self.benchmark_results.append(cached.benchmark)
+            return target
 
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.settings.cache_dir / "locks" / f"{cache_key}.lock"
@@ -524,33 +593,35 @@ class _LazyKernel:
         with _cache_lock(lock_path):
             cached = _read_cache(self.settings.cache_dir, cache_key)
             if cached is None:
-                _wait_for_model(self.settings.model)
-                optimize_lock = OPTIMIZE_LOCK if self.settings.compute is None else contextlib.nullcontext()
-                with optimize_lock, _preserve_rng():
-                    # Remote evaluation acquires a sandbox; local evaluation needs no resource scope.
-                    if self.settings.compute is not None:
-                        evaluator_scope = _ComputeEvaluator(self.source, self.constants, inputs, self.settings)
-                    else:
-                        evaluator_scope = contextlib.closing(
-                            _Evaluator(
-                                self.baseline,
-                                self.constants,
-                                inputs,
-                                device,
+                with _model_connection(self.settings.model) as model_connection:
+                    optimize_lock = OPTIMIZE_LOCK if self.settings.compute is None else contextlib.nullcontext()
+                    with optimize_lock, _preserve_rng():
+                        # Remote evaluation acquires a sandbox; local evaluation needs no resource scope.
+                        if self.settings.compute is not None:
+                            evaluator_scope = _ComputeEvaluator(self.source, self.constants, inputs, self.settings)
+                        else:
+                            evaluator_scope = contextlib.closing(
+                                _Evaluator(
+                                    self.baseline,
+                                    self.constants,
+                                    inputs,
+                                    device,
+                                )
                             )
-                        )
-                    with evaluator_scope as evaluator:
-                        result = _run_agent(
-                            self.source,
-                            self.settings,
-                            evaluator,
-                            _run_graph_directory(
-                                self.settings.cache_dir,
-                                self.settings.run_id,
-                                cache_key,
-                            ),
-                            skills,
-                        )
+                        with evaluator_scope as evaluator:
+                            result = _run_agent(
+                                self.source,
+                                self.settings,
+                                evaluator,
+                                _run_graph_directory(
+                                    self.settings.cache_dir,
+                                    self.settings.run_id,
+                                    cache_key,
+                                ),
+                                skills,
+                                model_connection,
+                            )
+                report = result.report
                 if self.settings.compute is not None:
                     # The agent can rewrite its remote workbench, so installation needs a local gate.
                     with (
@@ -569,10 +640,14 @@ class _LazyKernel:
                             score = _report_score(report, label)
                             if 1 - score < self.settings.min_improvement:
                                 raise RuntimeError(f"{label} did not confirm the required {self.settings.min_improvement:.1%} speedup")
+                benchmark = _benchmark_result(cache_key, report)
+                if benchmark is None:
+                    raise RuntimeError("accepted benchmark report did not contain valid timings")
                 cached = _write_cache(
                     self.settings.cache_dir,
                     cache_key,
                     result.source,
+                    benchmark,
                 )
             else:
                 with contextlib.suppress(OSError):
@@ -582,9 +657,14 @@ class _LazyKernel:
                         cache_key,
                         cached.path,
                     )
-        if cached.source.decode("utf-8") == self.source:
-            return self.baseline
-        return _load_call_bytes(cached.source, self.constants)
+        # Load successfully before publishing the measurement to the caller.
+        if cached.source.decode("utf-8") == self.source:  # noqa: SIM108
+            target = self.baseline
+        else:
+            target = _load_call_bytes(cached.source, self.constants)
+        if cached.benchmark is not None and self.benchmark_results is not None:
+            self.benchmark_results.append(cached.benchmark)
+        return target
 
 
 # _canonical_source removes PyTorch's incrementing, non-executable AOT ID comment.
@@ -757,6 +837,33 @@ def _preserve_rng():
         torch.cuda.set_rng_state_all(cuda_states)
 
 
+# _benchmark_result converts trusted median timings into the small public result.
+def _benchmark_result(cache_key, report, cached=False):
+    """Return one validated public timing result, or None for old cache metadata."""
+    if not isinstance(report, dict):
+        return None
+    try:
+        chip = report["chip"]
+        torch_inductor_ms = float(report["torch_inductor_ms"])
+        tilesmith_ms = float(report["candidate_ms"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(chip, str) or not chip:
+        return None
+    if not math.isfinite(torch_inductor_ms) or torch_inductor_ms <= 0:
+        return None
+    if not math.isfinite(tilesmith_ms) or tilesmith_ms <= 0:
+        return None
+    return Benchmark(
+        cache_key,
+        chip,
+        torch_inductor_ms,
+        tilesmith_ms,
+        torch_inductor_ms / tilesmith_ms,
+        cached,
+    )
+
+
 # _read_cache accepts only a manifest whose key and source digest match the artifact on disk.
 def _read_cache(cache_dir, cache_key):
     artifact, manifest = _artifact_paths(cache_dir, cache_key)
@@ -773,13 +880,17 @@ def _read_cache(cache_dir, cache_key):
     except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeError):
         return None
     source_hash = hashlib.sha256(source).hexdigest()
+    if not isinstance(metadata, dict):
+        return None
+    benchmark_metadata = metadata.pop("benchmark", None)
     if metadata != {"cache_key": cache_key, "sha256": source_hash}:
         return None
-    return _CachedSource(artifact, source)
+    benchmark = _benchmark_result(cache_key, benchmark_metadata, cached=True)
+    return _CachedSource(artifact, source, benchmark)
 
 
 # _write_cache syntax-checks the final candidate and atomically publishes source before its manifest.
-def _write_cache(cache_dir, cache_key, source):
+def _write_cache(cache_dir, cache_key, source, benchmark=None):
     source_bytes = source.encode()
     if len(source_bytes) > MAX_SOURCE_BYTES:
         raise ValueError("candidate source exceeds 64 MiB")
@@ -788,19 +899,22 @@ def _write_cache(cache_dir, cache_key, source):
     artifact.parent.mkdir(parents=True, exist_ok=True)
     manifest.parent.mkdir(parents=True, exist_ok=True)
     source_hash = hashlib.sha256(source_bytes).hexdigest()
+    metadata = {"cache_key": cache_key, "sha256": source_hash}
+    if benchmark is not None:
+        metadata["benchmark"] = {
+            "candidate_ms": benchmark.tilesmith_ms,
+            "chip": benchmark.chip,
+            "torch_inductor_ms": benchmark.torch_inductor_ms,
+        }
     with tempfile.NamedTemporaryFile("w", dir=cache_dir, suffix=".py", delete=False) as source_file:
         source_file.write(source)
         source_temp = Path(source_file.name)
     with tempfile.NamedTemporaryFile("w", dir=cache_dir, suffix=".json", delete=False) as manifest_file:
-        json.dump(
-            {"cache_key": cache_key, "sha256": source_hash},
-            manifest_file,
-            sort_keys=True,
-        )
+        json.dump(metadata, manifest_file, sort_keys=True)
         manifest_temp = Path(manifest_file.name)
     os.replace(source_temp, artifact)
     os.replace(manifest_temp, manifest)
-    return _CachedSource(artifact, source_bytes)
+    return _CachedSource(artifact, source_bytes, benchmark)
 
 
 # _load_call imports accepted source with Inductor constants and an optional precomputed cache key.
@@ -1456,6 +1570,7 @@ class _BenchmarkTrack:
         source_hash = hashlib.sha256(source.encode()).hexdigest()
         self.baseline_score = baseline_score
         self.best_score = baseline_score
+        self.best_report = None
         self.best_source = source
         self.evaluator = evaluator
         self.loop = -1
@@ -1597,6 +1712,7 @@ class _BenchmarkTrack:
             previous_best = self.best_score
             if confirmed_score < self.best_score:
                 self.best_score = confirmed_score
+                self.best_report = dict(confirmation)
                 self.best_source = candidate
             return self._record(
                 source_hash,
@@ -1668,25 +1784,103 @@ def _agent_instructions(settings, evaluator, skills):
     return "\n\n".join(sections)
 
 
-# _model_connection normalizes the supported OpenAI-compatible credential sources.
-def _model_connection():
-    """Return an API key and endpoint before any paid sandbox is provisioned."""
+# _api_key_connection normalizes the supported direct OpenAI-compatible credential sources.
+def _api_key_connection():
+    """Return an API key and endpoint when the user configured direct API access."""
     api_key = os.environ.get("OPENAI_API_KEY")
     base_url = os.environ.get("OPENAI_BASE_URL")
     if not api_key:
         api_key = os.environ.get("OPENROUTER_API_KEY")
         base_url = "https://openrouter.ai/api/v1"
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY or OPENROUTER_API_KEY is required to run the Tilesmith agent")
     return api_key, base_url
 
 
-# _wait_for_model prevents a proxy startup race from consuming a GPU before its model is ready.
-def _wait_for_model(model, timeout_seconds=60):
+# _codex_login_installation locates the external CLIProxyAPI login without reading its credentials.
+def _codex_login_installation():
+    """Return the configured CLIProxyAPI executable and auth directory, or None when unavailable."""
+    executable = os.environ.get("TILESMITH_CLIPROXYAPI_EXECUTABLE") or shutil.which("cliproxyapi")
+    auth_directory = Path(os.environ.get("TILESMITH_CLIPROXYAPI_AUTH_DIR", Path.home() / ".cli-proxy-api")).expanduser()
+    if executable is None or not auth_directory.is_dir():
+        return None
+    return executable, auth_directory
+
+
+# _loopback_port reserves a local port long enough to write the temporary proxy configuration.
+def _loopback_port():
+    """Return an available loopback TCP port for a private CLIProxyAPI process."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
+
+
+# _codex_proxy_config builds the private configuration discarded when one optimization run ends.
+def _codex_proxy_config(port, auth_directory, api_key):
+    """Return a loopback-only CLIProxyAPI configuration with a temporary client key."""
+    return "\n".join(
+        (
+            "host: 127.0.0.1",
+            f"port: {port}",
+            f"auth-dir: {json.dumps(str(auth_directory))}",
+            "api-keys:",
+            f"  - {json.dumps(api_key)}",
+            "logging-to-file: false",
+            "",
+        )
+    )
+
+
+# _stop_proxy terminates only the private child process created for this optimization run.
+def _stop_proxy(process):
+    """Stop a CLIProxyAPI child without touching any user-owned proxy process."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+# _model_connection keeps one direct API or Codex-login route alive for a complete agent run.
+@contextlib.contextmanager
+def _model_connection(model):
+    """Yield OpenAI-compatible credentials after confirming that the selected model is available."""
+    api_key, base_url = _api_key_connection()
+    if api_key:
+        _wait_for_model(model, api_key, base_url)
+        yield api_key, base_url
+        return
+    installation = _codex_login_installation()
+    if installation is None:
+        raise RuntimeError("configure OPENAI_API_KEY, OPENROUTER_API_KEY, or CLIProxyAPI Codex login")
+    executable, auth_directory = installation
+    api_key = secrets.token_urlsafe(32)
+    port = _loopback_port()
+    with tempfile.TemporaryDirectory(prefix="tilesmith-cliproxyapi-") as directory:
+        config_path = Path(directory) / "config.yaml"
+        config_path.write_text(
+            _codex_proxy_config(port, auth_directory, api_key),
+            encoding="utf-8",
+        )
+        process = subprocess.Popen(
+            (executable, "-config", str(config_path)),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            base_url = f"http://127.0.0.1:{port}/v1"
+            _wait_for_model(model, api_key, base_url)
+            yield api_key, base_url
+        finally:
+            _stop_proxy(process)
+
+
+# _wait_for_model prevents startup races from consuming a GPU before its model is ready.
+def _wait_for_model(model, api_key, base_url, timeout_seconds=60):
     """Wait until the OpenAI-compatible model list contains the requested model."""
     from openai import AuthenticationError, OpenAI
 
-    api_key, base_url = _model_connection()
     with OpenAI(
         api_key=api_key,
         base_url=base_url or None,
@@ -1715,13 +1909,13 @@ def _wait_for_model(model, timeout_seconds=60):
 
 
 # _chat_model builds the OpenAI-compatible model used by the Deep Agents graph.
-def _chat_model(settings):
+def _chat_model(settings, connection):
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as error:
         raise RuntimeError("Tilesmith requires deepagents and langchain-openai") from error
 
-    api_key, base_url = _model_connection()
+    api_key, base_url = connection
     return ChatOpenAI(
         api_key=api_key,
         base_url=base_url,
@@ -1735,7 +1929,7 @@ def _chat_model(settings):
 
 
 # _run_agent executes one permissive Deep Agents graph and installs only a freshly confirmed win.
-def _run_agent(source, settings, evaluator, workspace_dir, skills):
+def _run_agent(source, settings, evaluator, workspace_dir, skills, model_connection=None):
     """Run an agent track and return only a confirmed improvement."""
     baseline_factory = getattr(evaluator, "baseline_report", None)
     baseline_report = baseline_factory() if baseline_factory is not None else evaluator.evaluate(source)
@@ -1787,7 +1981,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
                 self.count += 1
 
     call_counter = ModelCallCounter(settings.max_model_calls)
-    chat_model = _chat_model(settings)
+    chat_model = _chat_model(settings, model_connection)
     chat_model.callbacks = [*(chat_model.callbacks or ()), call_counter]
 
     # Local agent tools are rooted file operations; arbitrary commands stay in gpu_shell.
@@ -1987,4 +2181,5 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
         confirmed_score,
         track.benchmarks,
         model_calls,
+        track.best_report,
     )

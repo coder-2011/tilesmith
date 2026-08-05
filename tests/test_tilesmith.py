@@ -51,12 +51,19 @@ class _Evaluator:
         if "broken" in source:
             raise RuntimeError("candidate did not compile")
         if "optimized-2" in source:
-            return {"score": 0.4}
-        if "optimized" in source:
-            return {"score": 0.5}
-        if source.startswith("candidate-"):
-            return {"score": 1 - int(source.split("-")[1]) / 100}
-        return {"score": 1.0}
+            score = 0.4
+        elif "optimized" in source:
+            score = 0.5
+        elif source.startswith("candidate-"):
+            score = 1 - int(source.split("-")[1]) / 100
+        else:
+            score = 1.0
+        return {
+            "candidate_ms": score,
+            "chip": self.chip,
+            "score": score,
+            "torch_inductor_ms": 1.0,
+        }
 
     # shell exercises the real agent tool boundary with deterministic output.
     def shell(self, command, workspace, timeout_seconds):
@@ -153,6 +160,7 @@ class TilesmithAgentTests(unittest.TestCase):
 
         self.assertIs(result, compiled)
         self.assertIsInstance(compiled.current_callable, tilesmith._LazyKernel)
+        self.assertIs(compiled.current_callable.benchmark_results, backend.benchmark_results)
         self.assertIn("extern_kernels.mm", compiled.current_callable.source)
         self.assertIn(tilesmith.REFERENCE_START, compiled.current_callable.source)
 
@@ -345,7 +353,15 @@ class TilesmithAgentTests(unittest.TestCase):
         cache_key = "same-graph"
         with tempfile.TemporaryDirectory() as directory:
             cache_dir = Path(directory)
-            artifact = tilesmith._write_cache(cache_dir, cache_key, source)
+            benchmark = tilesmith.Benchmark(
+                cache_key,
+                "NVIDIA H100",
+                1.0,
+                0.5,
+                2.0,
+                False,
+            )
+            artifact = tilesmith._write_cache(cache_dir, cache_key, source, benchmark)
             tilesmith._record_cache_hit(cache_dir, "first", cache_key, artifact.path)
             tilesmith._record_cache_hit(cache_dir, "second", cache_key, artifact.path)
 
@@ -354,11 +370,17 @@ class TilesmithAgentTests(unittest.TestCase):
             first_record = json.loads((first / "cache.json").read_text())
             second_record = json.loads((second / "cache.json").read_text())
             cached_source = artifact.source.decode()
+            cached_benchmark = tilesmith._read_cache(cache_dir, cache_key).benchmark
+            compiled = Mock(_tilesmith_benchmarks=[cached_benchmark])
 
         self.assertNotEqual(first, second)
         self.assertEqual(first_record["status"], "cache_hit")
         self.assertEqual(second_record["artifact"], "artifacts/same-graph.py")
         self.assertEqual(cached_source, source)
+        self.assertEqual(tilesmith.benchmarks(compiled), (cached_benchmark,))
+        self.assertTrue(cached_benchmark.cached)
+        self.assertEqual(cached_benchmark.torch_inductor_ms, 1.0)
+        self.assertEqual(cached_benchmark.tilesmith_ms, 0.5)
 
     # test_gpu_shell_round_trips_candidate protects the local/remote edit boundary.
     def test_gpu_shell_round_trips_candidate(self):
@@ -658,6 +680,7 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(result.benchmarks, 2)
         self.assertEqual(result.model_calls, 6)
         self.assertEqual(result.confirmed_score, 0.4)
+        self.assertEqual(result.report["candidate_ms"], 0.4)
         self.assertEqual(evaluator.shell_commands, [("nvidia-smi", 30)])
         self.assertIn("read-1", first_trace)
         self.assertNotIn("read-1", second_trace)

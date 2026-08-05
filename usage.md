@@ -10,12 +10,23 @@ and Triton:
 
 ```sh
 python3 -m pip install tilesmith-ai
+```
+
+To enable optimization, configure one model route:
+
+```sh
 export OPENAI_API_KEY=...
 ```
 
-`OPENROUTER_API_KEY` also works. Set `OPENAI_BASE_URL` to use an
-OpenAI-compatible gateway, and `TILESMITH_MODEL` to choose a model. The default
-model is `gpt-5.5`.
+`OPENROUTER_API_KEY` also works; set `OPENAI_BASE_URL` to use another
+OpenAI-compatible gateway. Alternatively, without any API key, install and log
+in to `cliproxyapi` with Codex OAuth. Tilesmith detects its existing login at
+`~/.cli-proxy-api`; `TILESMITH_CLIPROXYAPI_EXECUTABLE` and
+`TILESMITH_CLIPROXYAPI_AUTH_DIR` override the executable and login directory.
+
+```sh
+cliproxyapi -codex-login
+```
 
 ## Compile a model
 
@@ -29,6 +40,7 @@ x = torch.randn(32, 1024, device="cuda")
 optimized_model = tilesmith.compile(
     model,
     example_inputs=(x,),
+    agent_model="gpt-5.5",
 )
 
 y = optimized_model(x)
@@ -38,10 +50,34 @@ y = optimized_model(x)
 representative shapes, dtypes, and devices: Tilesmith uses the first real call
 to check correctness and measure candidates.
 
+`agent_model` selects the model that optimizes generated wrappers. It takes
+precedence over `TILESMITH_MODEL`, which can supply the same setting globally.
+Choose a model listed by your API provider or Codex login.
+
 Optimization is lazy. `tilesmith.compile()` returns a normal
 `torch.compile` callable, and PyTorch compiles it when you first invoke it.
 Tilesmith then works on eligible Inductor-generated CUDA wrappers. It does not
 rewrite the original model.
+
+## Read benchmark speeds
+
+Call the optimized model once, then read the accepted per-graph measurements:
+
+```python
+y = optimized_model(x)
+
+for result in tilesmith.benchmarks(optimized_model):
+    print(f"PyTorch Inductor: {result.torch_inductor_ms:.3f} ms")
+    print(f"Tilesmith:        {result.tilesmith_ms:.3f} ms")
+    print(f"Speedup:          {result.speedup:.2f}x")
+```
+
+The result tuple is empty before the first call and when Tilesmith keeps the
+ordinary Inductor implementation. There may be more than one result when
+PyTorch creates separate forward, backward, graph-break, or specialized
+graphs. `torch_inductor_ms` is the original PyTorch-generated graph, not eager
+PyTorch. `cached=True` means the numbers came from the exact accepted artifact's
+saved benchmark instead of a new timing run.
 
 ## Control the optimization
 
@@ -49,6 +85,7 @@ rewrite the original model.
 optimized_model = tilesmith.compile(
     model,
     example_inputs=(x,),
+    agent_model="gpt-5.5",
     agency="medium",
     loops=1,
     max_model_calls=None,
@@ -64,6 +101,7 @@ optimized_model = tilesmith.compile(
   kernel fusion while preserving the high-level algorithm.
 - `agency="high"` allows broader algorithm and implementation changes while
   preserving the generated callable's behavior.
+- `agent_model` selects the optimization agent. It overrides `TILESMITH_MODEL`.
 - `loops` is the number of confirmed improvements to accept. It defaults to
   `1`; rejected candidates do not consume a loop.
 - `max_model_calls` sets an exact optional limit on model invocations. The
@@ -119,7 +157,9 @@ destroyed afterward.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `TILESMITH_MODEL` | `gpt-5.5` | Agent model |
+| `TILESMITH_MODEL` | unset | Agent model when `agent_model` is omitted |
+| `TILESMITH_CLIPROXYAPI_EXECUTABLE` | `cliproxyapi` on `PATH` | Codex-login proxy executable |
+| `TILESMITH_CLIPROXYAPI_AUTH_DIR` | `~/.cli-proxy-api` | Codex-login directory |
 | `TILESMITH_MIN_IMPROVEMENT` | `0.02` | Required fractional speedup |
 | `TILESMITH_TIMEOUT` | `1200` | Optimization timeout in seconds |
 | `TILESMITH_SANDBOX_TIMEOUT` | `3600` | ComputeSDK sandbox lifetime in seconds |
@@ -137,6 +177,11 @@ Set `TILESMITH_DEBUG=1` to save complete per-turn agent traces as
 `profiles/trace_00.json`, `trace_01.json`, and so on beneath that run directory.
 Traces can include generated source and tool arguments, so treat the cache
 directory as private. Cache hits do not create traces because no agent runs.
+
+When `example_inputs`, `agent_model`/`TILESMITH_MODEL`, or both the API-key and
+Codex-login routes are unavailable, `tilesmith.compile(...)` returns ordinary
+`torch.compile(...)`. In that fallback, Tilesmith does not require CUDA inputs,
+run an agent, create cache files, or expose benchmark records.
 
 If the agent, provider, validation, or timing step fails, Tilesmith warns and
 keeps the ordinary Inductor implementation. It never installs an unconfirmed
