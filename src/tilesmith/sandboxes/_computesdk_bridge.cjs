@@ -166,7 +166,7 @@ async function abortCreateOperations() {
   await Promise.allSettled(operations.map((operation) => operation.completion));
 }
 
-/** Terminate a provider sandbox and wait until Modal confirms teardown. */
+/** Terminate a provider sandbox and wait for provider-confirmed teardown when available. */
 async function terminateSandbox(sandbox) {
   const instance = typeof sandbox.getInstance === "function" ? sandbox.getInstance() : undefined;
   const nativeSandbox = instance?.sandbox ?? instance;
@@ -243,11 +243,6 @@ async function dispatch(request) {
       createOperations.set(request.id, { controller, completion });
       try {
         const options = { ...(request.options || {}), signal: controller.signal };
-        // Modal exposes reliable native readiness only when creation includes a probe.
-        if (options.provider === "modal" && options.readinessProbe === undefined) {
-          const { Probe } = packageLoader()("modal");
-          options.readinessProbe = Probe.withExec(["sh", "-lc", "true"], { intervalMs: 500 });
-        }
         const sandbox = await compute.sandbox.create(options);
         sandboxes.set(sandbox.sandboxId, sandbox);
         ownedSandboxIds.add(sandbox.sandboxId);

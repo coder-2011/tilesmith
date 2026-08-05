@@ -50,7 +50,6 @@ REMOTE_WORKSPACE = f"{REMOTE_ROOT}/workbench"
 REMOTE_COMMAND_TIMEOUT_MS = 20 * 60 * 1000
 SANDBOX_READY_TIMEOUT_MS = 15 * 60 * 1000
 UPLOAD_CHUNK_BYTES = 384 * 1024  # Divisible by 3 so base64 chunks concatenate.
-DEFAULT_MODAL_TEMPLATE = "ghcr.io/astral-sh/uv:0.9.30-python3.12-bookworm"
 REFERENCE_START = "# --- TILESMITH PYTORCH FX REFERENCE (NOT EXECUTED) ---"
 REFERENCE_END = "# --- END TILESMITH PYTORCH FX REFERENCE ---"
 
@@ -276,15 +275,12 @@ def _read_compute_config(chip):
     sandbox_timeout = int(os.environ.get("TILESMITH_SANDBOX_TIMEOUT", "3600"))
     if sandbox_timeout <= 60:
         raise ValueError("TILESMITH_SANDBOX_TIMEOUT must be greater than 60")
-    template = os.environ.get("COMPUTESDK_TEMPLATE")
-    if template is None and provider_name == "modal":
-        template = DEFAULT_MODAL_TEMPLATE
     return _ComputeConfig(
         chip=chip,
         provider=provider,
         provider_name=provider_name,
         sandbox_timeout=sandbox_timeout,
-        template=template,
+        template=os.environ.get("COMPUTESDK_TEMPLATE"),
     )
 
 

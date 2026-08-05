@@ -184,8 +184,9 @@ export E2B_API_KEY=...
 Tilesmith selects a compatible pinned package automatically. The
 `COMPUTESDK_PROVIDER_PACKAGE`, `COMPUTESDK_PROVIDER_FACTORY`,
 `COMPUTESDK_PROVIDER_VERSION`, and `COMPUTESDK_PROVIDER_CONFIG` overrides remain
-available for custom providers. `COMPUTESDK_TEMPLATE` selects an image and
-`TILESMITH_SANDBOX_TIMEOUT` bounds the sandbox lifetime.
+available for custom providers. Each provider's default template is used unless
+`COMPUTESDK_TEMPLATE` overrides it. `TILESMITH_SANDBOX_TIMEOUT` bounds the
+sandbox lifetime.
 
 ## Verified end-to-end result
 

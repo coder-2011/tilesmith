@@ -23,7 +23,6 @@ from urllib.parse import quote, quote_plus
 
 COMPUTESDK_COMMIT = "0cf74653ea2d448074054662d90880bc22eb3a4f"
 COMPUTESDK_VERSION = "4.1.4"
-MODAL_VERSION = "1.9.4"
 # These official provider releases all depend on the pinned ComputeSDK core above.
 OFFICIAL_PROVIDER_VERSIONS = {
     "archil": "0.4.7",
@@ -34,7 +33,7 @@ OFFICIAL_PROVIDER_VERSIONS = {
     "declaw": "0.2.8",
     "e2b": "1.7.52",
     "hopx": "0.2.27",
-    "modal": MODAL_VERSION,
+    "modal": "1.9.4",
     "namespace": "1.6.14",
     "runloop": "1.3.54",
     "tensorlake": "0.1.9",

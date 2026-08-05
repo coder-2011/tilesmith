@@ -413,9 +413,16 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(result, "sandbox-destroyed")
         self.assertEqual(events, ["sandbox-destroyed", "client-closed", "runner-closed"])
 
-    # test_compute_config_resolves_official_providers protects the one-name provider path.
+    # test_compute_config_resolves_official_providers protects the uniform one-name provider path.
     def test_compute_config_resolves_official_providers(self):
-        """Resolve official providers without TileSmith-specific credential translation."""
+        """Resolve official providers without TileSmith-specific defaults or credentials."""
+        with patch.dict("os.environ", {}, clear=True):
+            modal = tilesmith._read_compute_config("L4")
+
+        self.assertEqual(modal.provider_name, "modal")
+        self.assertEqual(modal.provider.version, "1.9.4")
+        self.assertIsNone(modal.template)
+
         with patch.dict("os.environ", {"COMPUTESDK_PROVIDER": "e2b"}, clear=True):
             config = tilesmith._read_compute_config("L4")
 
