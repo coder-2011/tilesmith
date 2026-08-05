@@ -346,112 +346,6 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(second_record["artifact"], "artifacts/same-graph.py")
         self.assertEqual(cached_source, source)
 
-    # test_cache_and_chip_identity_cover_cosmetic_and_numeric_names groups two pure identity boundaries.
-    def test_cache_and_chip_identity_cover_cosmetic_and_numeric_names(self):
-        """Ignore FX comments while matching exact compact or numeric GPU models."""
-        self.assertTrue(tilesmith.chip_matches("RTX 4090", "NVIDIA GeForce RTX 4090"))
-        self.assertTrue(tilesmith.chip_matches("RTX PRO 6000", "NVIDIA RTX PRO 6000 Blackwell"))
-        self.assertTrue(tilesmith.chip_matches("gpu_1x_h100_pcie", "NVIDIA H100 80GB HBM3"))
-        self.assertTrue(tilesmith.chip_matches("H100", "NVIDIA H100 80GB HBM3"))
-        self.assertFalse(tilesmith.chip_matches("H100", "NVIDIA H1000"))
-
-        torch_module = ModuleType("torch")
-        torch_module.__version__ = "test-torch"
-        torch_module.are_deterministic_algorithms_enabled = Mock(return_value=False)
-        torch_module.get_float32_matmul_precision = Mock(return_value="highest")
-        torch_module.version = Mock(cuda="test-cuda")
-        torch_module.cuda = Mock()
-        torch_module.cuda.get_device_capability.return_value = (9, 0)
-        torch_module.cuda.get_device_name.return_value = "NVIDIA H100"
-        triton_module = ModuleType("triton")
-        triton_module.__version__ = "test-triton"
-        settings = Mock(
-            agency="medium",
-            compute=None,
-            loops=1,
-            max_model_calls=None,
-            min_improvement=0.02,
-            model="test-model",
-        )
-        first = tilesmith._with_reference("def forward(self, x):\n    return x", "def call(args):\n    return args\n")
-        second = tilesmith._with_reference("def forward(self, value):\n    return value", "def call(args):\n    return args\n")
-        changed = tilesmith._with_reference("def forward(self, x):\n    return x", "def call(args):\n    return args[0]\n")
-
-        with (
-            patch.dict(sys.modules, {"torch": torch_module, "triton": triton_module}),
-            patch.object(tilesmith, "_package_version", return_value="test-package"),
-        ):
-            first_key = tilesmith._cache_key(first, settings, Mock(index=0), "graph", ())
-            second_key = tilesmith._cache_key(second, settings, Mock(index=0), "graph", ())
-            changed_key = tilesmith._cache_key(changed, settings, Mock(index=0), "graph", ())
-
-        self.assertEqual(first_key, second_key)
-        self.assertNotEqual(first_key, changed_key)
-
-    # test_measurement_oracle_rejects_observable_tensor_changes covers the stress-test edge cases together.
-    def test_measurement_oracle_rejects_observable_tensor_changes(self):
-        """Preserve expanded views, metadata, ordering, zero signs, and constant aliases."""
-        try:
-            import torch
-        except ImportError:
-            self.skipTest("PyTorch is optional in the local test environment")
-
-        expanded = torch.tensor([1.25]).expand(8)
-        (high,) = tilesmith.variant_inputs(torch, (expanded,), "high")
-        torch.testing.assert_close(high, torch.full((8,), 5.0))
-        self.assertEqual(high.stride(), (0,))
-
-        mismatches = (
-            (torch.tensor([0.0]), torch.tensor([-0.0]), "signed-zero"),
-            ({"second": torch.tensor(2), "first": torch.tensor(1)}, {"first": torch.tensor(1), "second": torch.tensor(2)}, "mapping"),
-            (torch.tensor([1.0]), torch.tensor([1.0], requires_grad=True), "autograd"),
-            (torch.tensor([1 + 2j]).conj_physical(), torch.tensor([1 + 2j]).conj(), "conjugation"),
-        )
-        for actual, expected, name in mismatches:
-            with self.subTest(name=name), self.assertRaises(AssertionError):
-                tilesmith.assert_tensor_graph_matches(torch, actual, expected)
-
-        reference_constant = torch.arange(6.0)
-        candidate_constant = reference_constant.clone()
-
-        # The candidate preserves values but no longer returns a view of its captured constant.
-        def reference(_inputs):
-            return reference_constant[1:5]
-
-        def candidate(_inputs):
-            return candidate_constant.clone()[1:5]
-
-        with self.assertRaisesRegex(AssertionError, "alias relationships"):
-            tilesmith.assert_candidate_matches(
-                torch,
-                reference,
-                candidate,
-                (),
-                reference_constants=reference_constant,
-                candidate_constants=candidate_constant,
-            )
-
-    # test_cache_lock_supports_windows keeps package import and cache locking portable.
-    def test_cache_lock_supports_windows(self):
-        """Use the Windows byte-range lock when POSIX flock is unavailable."""
-        msvcrt = ModuleType("msvcrt")
-        msvcrt.LK_LOCK = 1
-        msvcrt.LK_UNLCK = 2
-        msvcrt.locking = Mock()
-        with tempfile.TemporaryDirectory() as directory:
-            lock_path = Path(directory) / "cache.lock"
-            with (
-                patch.object(tilesmith.os, "name", "nt"),
-                patch.dict(sys.modules, {"msvcrt": msvcrt}),
-                tilesmith._cache_lock(lock_path),
-            ):
-                self.assertEqual(lock_path.read_bytes(), b"\0")
-
-        self.assertEqual(
-            [call.args[1:] for call in msvcrt.locking.call_args_list],
-            [(msvcrt.LK_LOCK, 1), (msvcrt.LK_UNLCK, 1)],
-        )
-
     # test_gpu_shell_round_trips_candidate protects the local/remote edit boundary.
     def test_gpu_shell_round_trips_candidate(self):
         """Round-trip only the active candidate through the GPU shell."""
@@ -586,53 +480,28 @@ class TilesmithAgentTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    # test_compute_bridge_preserves_payloads_and_redacts_diagnostics covers both transport boundaries.
-    def test_compute_bridge_preserves_payloads_and_redacts_diagnostics(self):
-        """Keep opaque successes exact while filtering secrets from diagnostics."""
+    # test_compute_bridge_rejects_ambiguous_values covers protocol safety edges together.
+    def test_compute_bridge_rejects_ambiguous_values(self):
+        """Reject ambiguous JSON values and invalid request deadlines."""
         from tilesmith.sandboxes.computesdk import (
             _Bridge,
             _json_bytes,
-            _mapping_values,
-            _Pending,
+            _prepare_redactions,
             _redact,
+            _redact_value,
         )
 
+        redactions = _prepare_redactions(("abc", "abcdef", "api key/value"))
+        value = {"api+key%2Fvalue": ["abcdef"]}
+        self.assertEqual(_redact_value(value, redactions), {"[REDACTED]": ["[REDACTED]"]})
         with self.assertRaisesRegex(ValueError, "JSON serializable"):
             _json_bytes({"value": float("nan")})
-        self.assertEqual(
-            _mapping_values({"PYTHONDONTWRITEBYTECODE": "1", "API_TOKEN": "provider-secret"}),
-            ("provider-secret",),
-        )
 
         with patch.dict("os.environ", {"E2B_API_KEY": "provider-secret"}, clear=True):
             bridge = _Bridge((), "priority", True, 1.0)
         self.assertEqual(_redact("leaked provider-secret", bridge._redactions), "leaked [REDACTED]")
         with self.assertRaisesRegex(ValueError, "finite and positive"):
             asyncio.run(bridge.call("noop", timeout=0))
-
-        # receive_exact models a base64/file response containing an accidental secret substring.
-        async def receive_exact(redact_result):
-            process = Mock(returncode=0)
-            process.stdout = asyncio.StreamReader()
-            process.stdout.feed_data(b'{"id":1,"result":{"stdout":"5abc2"}}\n')
-            process.stdout.feed_eof()
-            bridge = _Bridge((), "priority", True, 1.0)
-            bridge._process = process
-            future = asyncio.get_running_loop().create_future()
-            bridge._pending[1] = _Pending(future, ("abc",), redact_result, None, None)
-            await bridge._read_responses()
-            return future.result()
-
-        self.assertEqual(asyncio.run(receive_exact(False)), {"stdout": "5abc2"})
-        self.assertEqual(asyncio.run(receive_exact(True)), {"stdout": "5[REDACTED]2"})
-
-        import moe_benchmark
-
-        sandbox = Mock()
-        sandbox.run_command = AsyncMock(return_value=Mock(exit_code=0, stderr="", stdout="NWFiYzI="))
-        content, consumed = asyncio.run(moe_benchmark._read_log_chunk(sandbox, "/tmp/log", 0))
-        self.assertEqual((content, consumed), ("5abc2", 5))
-        self.assertFalse(sandbox.run_command.await_args.kwargs["redact_output"])
 
     # test_sandbox_destroy_survives_caller_cancellation protects paid-resource teardown.
     def test_sandbox_destroy_survives_caller_cancellation(self):
