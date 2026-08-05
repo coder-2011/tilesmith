@@ -229,11 +229,10 @@ async def _run_remote(model, chip):
     }
     if config.template is not None:
         options["templateId"] = config.template
-    async with ComputeSDKClient([config.provider]) as client:
+    async with ComputeSDKClient(config.provider) as client:
         readiness_timeout = config.readiness_timeout_ms
         async with client.ephemeral_sandbox(
             options,
-            provider=config.provider_name,
             request_timeout=readiness_timeout / 1_000,
         ) as sandbox:
             print(

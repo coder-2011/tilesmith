@@ -419,14 +419,13 @@ class TilesmithAgentTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             modal = tilesmith._read_compute_config("L4")
 
-        self.assertEqual(modal.provider_name, "modal")
+        self.assertEqual(modal.provider.package, "@computesdk/modal")
         self.assertEqual(modal.provider.version, "1.9.4")
         self.assertIsNone(modal.template)
 
         with patch.dict("os.environ", {"COMPUTESDK_PROVIDER": "e2b"}, clear=True):
             config = tilesmith._read_compute_config("L4")
 
-        self.assertEqual(config.provider_name, "e2b")
         self.assertEqual(config.provider.package, "@computesdk/e2b")
         self.assertEqual(config.provider.factory, "e2b")
         self.assertEqual(config.provider.version, "1.7.52")
@@ -448,7 +447,7 @@ class TilesmithAgentTests(unittest.TestCase):
     # test_compute_bridge_accepts_large_responses protects generated-source and trace reads.
     def test_compute_bridge_accepts_large_responses(self):
         """Configure the bridge for bounded large generated-source responses."""
-        from tilesmith.sandboxes.computesdk import _BRIDGE_RESPONSE_LIMIT_BYTES, _Bridge
+        from tilesmith.sandboxes.computesdk import _BRIDGE_RESPONSE_LIMIT_BYTES, ProviderSpec, _Bridge
 
         # exercise captures the subprocess options without starting npm or a provider.
         async def exercise():
@@ -456,7 +455,8 @@ class TilesmithAgentTests(unittest.TestCase):
             process.returncode = 0
             process.stdout = asyncio.StreamReader()
             process.stderr = asyncio.StreamReader()
-            bridge = _Bridge((), "priority", True, 1.0)
+            provider = ProviderSpec("@computesdk/modal", "modal", "1.9.4")
+            bridge = _Bridge(provider, 1.0)
             with (
                 patch(
                     "asyncio.create_subprocess_exec",
@@ -484,6 +484,7 @@ class TilesmithAgentTests(unittest.TestCase):
     def test_compute_bridge_rejects_ambiguous_values(self):
         """Reject ambiguous JSON values and invalid request deadlines."""
         from tilesmith.sandboxes.computesdk import (
+            ProviderSpec,
             _Bridge,
             _json_bytes,
             _prepare_redactions,
@@ -498,7 +499,8 @@ class TilesmithAgentTests(unittest.TestCase):
             _json_bytes({"value": float("nan")})
 
         with patch.dict("os.environ", {"E2B_API_KEY": "provider-secret"}, clear=True):
-            bridge = _Bridge((), "priority", True, 1.0)
+            provider = ProviderSpec("@computesdk/modal", "modal", "1.9.4")
+            bridge = _Bridge(provider, 1.0)
         self.assertEqual(_redact("leaked provider-secret", bridge._redactions), "leaked [REDACTED]")
         with self.assertRaisesRegex(ValueError, "finite and positive"):
             asyncio.run(bridge.call("noop", timeout=0))

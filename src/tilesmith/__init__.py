@@ -106,7 +106,6 @@ class _ComputeConfig:
 
     chip: str
     provider: ProviderSpec
-    provider_name: str
     sandbox_timeout: int
     template: str | None
 
@@ -277,7 +276,6 @@ def _read_compute_config(chip):
     return _ComputeConfig(
         chip=chip,
         provider=provider,
-        provider_name=provider_name,
         sandbox_timeout=sandbox_timeout,
         template=os.environ.get("COMPUTESDK_TEMPLATE"),
     )
@@ -622,7 +620,6 @@ def _cache_key(source, settings, device, graph_key, skills):
         "compute": (
             {
                 "chip": settings.compute.chip,
-                "provider": settings.compute.provider_name,
                 "provider_factory": settings.compute.provider.factory,
                 "provider_package": settings.compute.provider.package,
                 "provider_version": settings.compute.provider.version,
@@ -913,7 +910,7 @@ class _ComputeSandbox:
 
         self.runner = asyncio.Runner()
         self.client = ComputeSDKClient(
-            [self.config.provider],
+            self.config.provider,
             request_timeout=min(300.0, self.command_timeout_ms / 1_000),
         )
         try:
@@ -926,7 +923,6 @@ class _ComputeSandbox:
                 options["templateId"] = self.config.template
             self.sandbox_scope = self.client.ephemeral_sandbox(
                 options,
-                provider=self.config.provider_name,
                 request_timeout=self.readiness_timeout_ms / 1_000,
             )
             self.sandbox = self.runner.run(self.sandbox_scope.__aenter__())

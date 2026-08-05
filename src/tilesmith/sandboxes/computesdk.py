@@ -14,14 +14,13 @@ import math
 import os
 import re
 import shutil
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Self, cast
+from typing import Self, cast
 from urllib.parse import quote, quote_plus
 
-COMPUTESDK_COMMIT = "0cf74653ea2d448074054662d90880bc22eb3a4f"
 COMPUTESDK_VERSION = "4.1.4"
 # These official provider releases all depend on the pinned ComputeSDK core above.
 OFFICIAL_PROVIDER_VERSIONS = {
@@ -40,14 +39,11 @@ OFFICIAL_PROVIDER_VERSIONS = {
     "upstash": "0.3.9",
     "vercel": "1.7.31",
 }
-JUST_BASH_VERSION = "0.4.15"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
 _BRIDGE_RESPONSE_LIMIT_BYTES = 128 * 1024 * 1024
 _BRIDGE_PATH = Path(__file__).with_name("_computesdk_bridge.cjs")
 _PACKAGE_PATTERN = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
 _SECRET_NAME_PARTS = frozenset({"CREDENTIAL", "KEY", "PASSWORD", "SECRET", "TOKEN"})
-
-StreamCallback = Callable[[str], None]
 
 
 class ComputeSDKError(RuntimeError):
@@ -74,11 +70,6 @@ class ProviderSpec:
         object.__setattr__(self, "config", dict(self.config))
         _json_bytes(self.config)
 
-    @property
-    def install_spec(self) -> str:
-        """Return the exact npm package selector installed by npm exec."""
-        return f"{self.package}@{self.version}"
-
 
 @dataclass(frozen=True, slots=True)
 class CommandResult:
@@ -90,48 +81,13 @@ class CommandResult:
     duration_ms: float
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxInfo:
-    """Describe provider-neutral sandbox state returned by ComputeSDK."""
-
-    sandbox_id: str
-    provider: str
-    status: Literal["running", "stopped", "error"]
-    created_at: str
-    timeout_ms: float
-    metadata: Mapping[str, object]
-
-
-@dataclass(frozen=True, slots=True)
-class FileEntry:
-    """Describe one file or directory returned by ``readdir``."""
-
-    name: str
-    type: Literal["file", "directory"]
-    size: float | None = None
-    modified: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SnapshotInfo:
-    """Describe one provider snapshot returned by ComputeSDK."""
-
-    snapshot_id: str
-    provider: str
-    created_at: str
-    metadata: Mapping[str, object]
-
-
 @dataclass(slots=True)
 class _Pending:
-    """Retain one in-flight bridge response and optional stream callbacks."""
+    """Retain one in-flight bridge response and its redaction policy."""
 
     future: asyncio.Future[object]
     redactions: tuple[str, ...]
     redact_result: bool
-    on_stdout: StreamCallback | None
-    on_stderr: StreamCallback | None
-    callback_error: BaseException | None = None
 
 
 class _Bridge:
@@ -139,17 +95,13 @@ class _Bridge:
 
     def __init__(
         self,
-        providers: Sequence[ProviderSpec],
-        provider_strategy: Literal["priority", "round-robin"],
-        fallback_on_error: bool,
+        provider: ProviderSpec,
         request_timeout: float,
     ) -> None:
         """Capture immutable process configuration without starting Node."""
-        self._providers = tuple(providers)
-        self._provider_strategy = provider_strategy
-        self._fallback_on_error = fallback_on_error
+        self._provider = provider
         self._request_timeout = request_timeout
-        config_strings = tuple(value for provider in providers for value in _config_strings(provider.config))
+        config_strings = _config_strings(provider.config)
         self._redactions = _prepare_redactions((*config_strings, *_environment_secrets()))
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -159,8 +111,8 @@ class _Bridge:
         self._next_id = 1
         self._write_lock = asyncio.Lock()
 
-    async def start(self) -> tuple[str, ...]:
-        """Start npm's pinned package environment and configure provider instances."""
+    async def start(self) -> None:
+        """Start npm's pinned package environment and configure the selected provider."""
         npm = shutil.which("npm")
         node = shutil.which("node")
         if npm is None or node is None:
@@ -169,7 +121,7 @@ class _Bridge:
             raise ComputeSDKError(f"ComputeSDK bridge is missing from the installed package: {_BRIDGE_PATH}")
 
         packages = [f"--package=computesdk@{COMPUTESDK_VERSION}"]
-        packages.extend(f"--package={provider.install_spec}" for provider in self._providers)
+        packages.append(f"--package={self._provider.package}@{self._provider.version}")
         command = [npm, "exec", "--yes", "--silent", *packages, "--", node, str(_BRIDGE_PATH)]
         self._process = await asyncio.create_subprocess_exec(
             *command,
@@ -184,29 +136,18 @@ class _Bridge:
             self._read_stderr(),
             name="tilesmith-computesdk-stderr",
         )
-        specifications = [{"package": provider.package, "factory": provider.factory, "config": provider.config} for provider in self._providers]
+        specification = {
+            "package": self._provider.package,
+            "factory": self._provider.factory,
+            "config": self._provider.config,
+        }
         try:
-            result = await self.call(
-                "configure",
-                {
-                    "providers": specifications,
-                    "providerStrategy": self._provider_strategy,
-                    "fallbackOnError": self._fallback_on_error,
-                },
-            )
+            await self.call("configure", {"provider": specification})
         except BaseException:
             # A failed package load must not leave npm or Node running in the background.
             with suppress(BaseException):
                 await self.close()
             raise
-        data = _object(result, "ComputeSDK configuration")
-        names = data.get("providers")
-        if not isinstance(names, list):
-            raise ComputeSDKError("ComputeSDK returned invalid configured provider names")
-        name_values = cast(list[object], names)
-        if not all(isinstance(name, str) for name in name_values):
-            raise ComputeSDKError("ComputeSDK returned invalid configured provider names")
-        return tuple(cast(list[str], name_values))
 
     async def call(
         self,
@@ -217,8 +158,6 @@ class _Bridge:
         cancellable: bool = False,
         redactions: Sequence[str] = (),
         redact_result: bool = True,
-        on_stdout: StreamCallback | None = None,
-        on_stderr: StreamCallback | None = None,
     ) -> object:
         """Send one request and await its matching response."""
         request_timeout = self._request_timeout if timeout is None else timeout
@@ -242,8 +181,6 @@ class _Bridge:
             future=loop.create_future(),
             redactions=self._redactions,
             redact_result=redact_result,
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
         )
         self._pending[request_id] = pending
 
@@ -319,23 +256,17 @@ class _Bridge:
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
                     raise ComputeSDKError("ComputeSDK bridge returned invalid JSON") from error
                 data = _object(message, "ComputeSDK bridge message")
-                request_id = data.get("requestId") if "event" in data else data.get("id")
+                request_id = data.get("id")
                 if not isinstance(request_id, int) or isinstance(request_id, bool):
                     continue
                 pending = self._pending.get(request_id)
                 if pending is None:
-                    continue
-                event = data.get("event")
-                if event in {"stdout", "stderr"}:
-                    self._deliver_stream(pending, cast(str, event), data.get("data"))
                     continue
                 if pending.future.done():
                     continue
                 error_value = data.get("error")
                 if error_value is not None:
                     pending.future.set_exception(self._remote_error(error_value, pending.redactions))
-                elif pending.callback_error is not None:
-                    pending.future.set_exception(pending.callback_error)
                 else:
                     result = data.get("result")
                     if pending.redact_result:
@@ -358,18 +289,6 @@ class _Bridge:
         while chunk := await process.stderr.read(8_192):
             self._stderr_tail.extend(chunk)
             del self._stderr_tail[:-8_000]
-
-    def _deliver_stream(self, pending: _Pending, event: str, value: object) -> None:
-        """Invoke one caller callback while retaining its first failure."""
-        if not isinstance(value, str) or pending.callback_error is not None:
-            return
-        callback = pending.on_stdout if event == "stdout" else pending.on_stderr
-        if callback is None:
-            return
-        try:
-            callback(_redact(value, pending.redactions))
-        except BaseException as error:
-            pending.callback_error = error
 
     def _remote_error(self, value: object, redactions: Sequence[str]) -> ComputeSDKError:
         """Convert a structured TypeScript error without leaking credentials."""
@@ -396,26 +315,20 @@ class _Bridge:
 
 
 class ComputeSDKClient:
-    """Expose modern ComputeSDK and any configured providers to Python."""
+    """Expose Tilesmith's selected ComputeSDK provider to Python."""
 
     def __init__(
         self,
-        providers: Sequence[ProviderSpec],
+        provider: ProviderSpec,
         *,
-        provider_strategy: Literal["priority", "round-robin"] = "priority",
-        fallback_on_error: bool = True,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
-        """Validate provider routing without installing packages or provisioning resources."""
-        if not providers:
-            raise ValueError("At least one ComputeSDK provider is required")
-        if provider_strategy not in {"priority", "round-robin"}:
-            raise ValueError(f"Invalid ComputeSDK provider strategy: {provider_strategy!r}")
+        """Retain one validated provider without provisioning resources."""
         if not math.isfinite(request_timeout) or request_timeout <= 0:
             raise ValueError("ComputeSDK request_timeout must be finite and positive")
-        self._bridge = _Bridge(providers, provider_strategy, fallback_on_error, request_timeout)
+        self._bridge = _Bridge(provider, request_timeout)
         self._start_lock = asyncio.Lock()
-        self._provider_names: tuple[str, ...] | None = None
+        self._started = False
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
 
@@ -436,22 +349,22 @@ class ComputeSDKClient:
                 ) from None
             raise
 
-    async def start(self) -> tuple[str, ...]:
-        """Install the pinned npm packages and return their provider names."""
+    async def start(self) -> None:
+        """Install the pinned npm packages exactly once."""
         if self._closed or self._close_task is not None:
             raise ComputeSDKError("ComputeSDK client is closed")
-        if self._provider_names is not None:
-            return self._provider_names
+        if self._started:
+            return
         async with self._start_lock:
-            if self._provider_names is None:
+            if not self._started:
                 try:
-                    self._provider_names = await self._bridge.start()
+                    await self._bridge.start()
+                    self._started = True
                 except BaseException:
                     self._closed = True
                     with suppress(BaseException):
                         await self._bridge.close()
                     raise
-        return self._provider_names
 
     async def close(self) -> None:
         """Destroy bridge-owned sandboxes and stop Node."""
@@ -478,16 +391,11 @@ class ComputeSDKClient:
         self,
         options: Mapping[str, object] | None = None,
         *,
-        provider: str | None = None,
         request_timeout: float | None = None,
     ) -> Sandbox:
-        """Create a sandbox through ComputeSDK's configured routing strategy."""
-        provider_names = await self.start()
-        if provider is not None and provider not in provider_names:
-            raise ValueError(f"Unknown configured ComputeSDK provider: {provider!r}")
+        """Create a sandbox through the selected ComputeSDK provider."""
+        await self.start()
         create_options = dict(options or {})
-        if provider is not None:
-            create_options["provider"] = provider
         redactions = _mapping_values(create_options.get("envs"))
         result = await self._bridge.call(
             "create",
@@ -496,105 +404,22 @@ class ComputeSDKClient:
             cancellable=True,
             redactions=redactions,
         )
-        return self._sandbox(result)
-
-    async def get_by_id(self, sandbox_id: str) -> Sandbox | None:
-        """Find a sandbox across configured providers by its provider ID."""
-        await self.start()
-        result = await self._bridge.call("getById", {"sandboxId": _nonempty(sandbox_id, "sandbox_id")})
-        return None if result is None else self._sandbox(result)
-
-    async def list_sandboxes(self) -> tuple[Sandbox, ...]:
-        """List sandboxes from every configured provider that supports listing."""
-        await self.start()
-        result = await self._bridge.call("listSandboxes")
-        if not isinstance(result, list):
-            raise ComputeSDKError("ComputeSDK returned an invalid sandbox list")
-        return tuple(self._sandbox(item) for item in cast(list[object], result))
-
-    async def destroy_sandbox(self, sandbox_id: str) -> None:
-        """Destroy a sandbox through ComputeSDK's provider-affinity routing."""
-        await self.start()
-        await self._bridge.call("destroySandbox", {"sandboxId": _nonempty(sandbox_id, "sandbox_id")})
-
-    async def create_snapshot(
-        self,
-        sandbox_id: str,
-        options: Mapping[str, object] | None = None,
-        *,
-        provider: str | None = None,
-    ) -> SnapshotInfo:
-        """Create a provider snapshot from an existing sandbox."""
-        await self.start()
-        snapshot_options = dict(options or {})
-        if provider is not None:
-            snapshot_options["provider"] = provider
-        result = await self._bridge.call(
-            "createSnapshot",
-            {"sandboxId": _nonempty(sandbox_id, "sandbox_id"), "options": snapshot_options},
+        data = _object(result, "ComputeSDK sandbox")
+        return Sandbox(
+            self._bridge,
+            _string(data.get("sandboxId"), "sandboxId"),
+            _string(data.get("provider"), "provider"),
         )
-        return _snapshot_info(result)
-
-    async def list_snapshots(self) -> tuple[SnapshotInfo, ...]:
-        """List snapshots from every configured snapshot-capable provider."""
-        await self.start()
-        result = await self._bridge.call("listSnapshots")
-        if not isinstance(result, list):
-            raise ComputeSDKError("ComputeSDK returned an invalid snapshot list")
-        return tuple(_snapshot_info(item) for item in cast(list[object], result))
-
-    async def delete_snapshot(self, snapshot_id: str) -> None:
-        """Delete a snapshot through ComputeSDK's provider-affinity routing."""
-        await self.start()
-        await self._bridge.call("deleteSnapshot", {"snapshotId": _nonempty(snapshot_id, "snapshot_id")})
-
-    async def create_template(self, provider: str, options: Mapping[str, object]) -> object:
-        """Create a provider template when that provider exposes a template manager."""
-        await self.start()
-        return await self._bridge.call("createTemplate", {"provider": _nonempty(provider, "provider"), "options": dict(options)})
-
-    async def list_templates(self, provider: str, options: Mapping[str, object] | None = None) -> object:
-        """List templates from one configured provider's optional manager."""
-        await self.start()
-        return await self._bridge.call("listTemplates", {"provider": _nonempty(provider, "provider"), "options": dict(options or {})})
-
-    async def delete_template(self, provider: str, template_id: str) -> None:
-        """Delete a template through one configured provider's optional manager."""
-        await self.start()
-        await self._bridge.call(
-            "deleteTemplate",
-            {"provider": _nonempty(provider, "provider"), "templateId": _nonempty(template_id, "template_id")},
-        )
-
-    async def daemon_seed_script(self, config: Mapping[str, object] | None = None) -> str:
-        """Return ComputeSDK's self-contained daemon seed launcher script."""
-        await self.start()
-        result = await self._bridge.call("daemonSeedScript", {"config": dict(config or {})})
-        return _string(result, "daemon seed script")
-
-    async def daemon_seed_script_command(self, payload: str | Mapping[str, object], config: Mapping[str, object] | None = None) -> str:
-        """Return ComputeSDK's shell-safe command for one daemon seed invocation."""
-        await self.start()
-        value: object = dict(payload) if isinstance(payload, Mapping) else payload
-        result = await self._bridge.call("daemonSeedScriptCommand", {"config": dict(config or {}), "payload": value})
-        return _string(result, "daemon seed command")
-
-    async def parse_seed_invocation_output(self, output: str) -> Mapping[str, object]:
-        """Parse the final JSON line emitted by a ComputeSDK daemon seed command."""
-        await self.start()
-        result = await self._bridge.call("parseSeedInvocationOutput", {"output": output})
-        return _object(result, "daemon seed invocation")
 
     @asynccontextmanager
     async def ephemeral_sandbox(
         self,
         options: Mapping[str, object] | None = None,
         *,
-        provider: str | None = None,
         request_timeout: float | None = None,
     ) -> AsyncGenerator[Sandbox]:
         """Create one sandbox and always attempt to destroy it."""
-        sandbox = await self.create(options, provider=provider, request_timeout=request_timeout)
+        sandbox = await self.create(options, request_timeout=request_timeout)
         try:
             yield sandbox
         except BaseException as operation_error:
@@ -619,15 +444,6 @@ class ComputeSDKClient:
                 cleanup_error.__dict__["computesdk_teardown"] = "failed"
                 raise
 
-    def _sandbox(self, value: object) -> Sandbox:
-        """Construct a Python sandbox handle from one bridge descriptor."""
-        data = _object(value, "ComputeSDK sandbox")
-        return Sandbox(
-            self._bridge,
-            _string(data.get("sandboxId"), "sandboxId"),
-            _string(data.get("provider"), "provider"),
-        )
-
 
 class Sandbox:
     """Expose the complete provider-neutral ComputeSDK sandbox interface."""
@@ -647,16 +463,13 @@ class Sandbox:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout_ms: int | None = None,
-        background: bool = False,
         redact_output: bool = True,
-        on_stdout: StreamCallback | None = None,
-        on_stderr: StreamCallback | None = None,
     ) -> CommandResult:
         """Run one shell command, redacting its output unless it is an opaque transfer."""
         _nonempty(command, "command")
         if timeout_ms is not None and timeout_ms <= 0:
             raise ValueError("timeout_ms must be greater than zero")
-        options: dict[str, object] = {"background": background}
+        options: dict[str, object] = {}
         if cwd is not None:
             options["cwd"] = cwd
         if env is not None:
@@ -670,14 +483,10 @@ class Sandbox:
                 "sandboxId": self.sandbox_id,
                 "command": command,
                 "options": options,
-                "streamStdout": on_stdout is not None,
-                "streamStderr": on_stderr is not None,
             },
             timeout=host_timeout,
             redactions=_mapping_values(env),
             redact_result=redact_output,
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
         )
         return _command_result(result)
 
@@ -694,32 +503,6 @@ class Sandbox:
         except ComputeSDKError as error:
             seconds = timeout_ms / 1_000
             raise ComputeSDKError(f"Sandbox did not become command-ready within {seconds:g} seconds: {error}") from error
-
-    async def get_info(self) -> SandboxInfo:
-        """Return current provider-neutral information about this sandbox."""
-        result = await self._bridge.call("getInfo", {"sandboxId": self.sandbox_id})
-        data = _object(result, "sandbox info")
-        status = _string(data.get("status"), "status")
-        if status not in {"running", "stopped", "error"}:
-            raise ComputeSDKError(f"ComputeSDK returned invalid sandbox status {status!r}")
-        return SandboxInfo(
-            sandbox_id=_string(data.get("id"), "id"),
-            provider=_string(data.get("provider"), "provider"),
-            status=cast(Literal["running", "stopped", "error"], status),
-            created_at=_string(data.get("createdAt"), "createdAt"),
-            timeout_ms=_number(data.get("timeout"), "timeout"),
-            metadata=_optional_object(data.get("metadata")),
-        )
-
-    async def get_url(self, port: int, *, protocol: str | None = None) -> str:
-        """Return the provider URL that exposes one sandbox port."""
-        if port <= 0 or port > 65_535:
-            raise ValueError("port must be between 1 and 65535")
-        options: dict[str, object] = {"port": port}
-        if protocol is not None:
-            options["protocol"] = protocol
-        result = await self._bridge.call("getUrl", {"sandboxId": self.sandbox_id, "options": options})
-        return _string(result, "sandbox URL")
 
     async def read_file(self, path: str) -> str:
         """Read one UTF-8 file through the provider filesystem."""
@@ -748,27 +531,12 @@ class Sandbox:
             {"sandboxId": self.sandbox_id, "path": _nonempty(path, "path"), "content": content},
         )
 
-    async def mkdir(self, path: str) -> None:
-        """Create one directory through the provider filesystem."""
-        await self._bridge.call("mkdir", {"sandboxId": self.sandbox_id, "path": _nonempty(path, "path")})
-
-    async def readdir(self, path: str) -> tuple[FileEntry, ...]:
-        """List one directory through the provider filesystem."""
-        result = await self._bridge.call("readdir", {"sandboxId": self.sandbox_id, "path": _nonempty(path, "path")})
-        if not isinstance(result, list):
-            raise ComputeSDKError("ComputeSDK returned an invalid directory listing")
-        return tuple(_file_entry(item) for item in cast(list[object], result))
-
     async def exists(self, path: str) -> bool:
         """Return whether a provider filesystem path exists."""
         result = await self._bridge.call("exists", {"sandboxId": self.sandbox_id, "path": _nonempty(path, "path")})
         if not isinstance(result, bool):
             raise ComputeSDKError("ComputeSDK returned an invalid filesystem existence result")
         return result
-
-    async def remove(self, path: str) -> None:
-        """Remove one path through the provider filesystem."""
-        await self._bridge.call("remove", {"sandboxId": self.sandbox_id, "path": _nonempty(path, "path")})
 
     async def destroy(self) -> None:
         """Destroy this sandbox exactly once through its provider object."""
@@ -878,11 +646,6 @@ def _object(value: object, description: str) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def _optional_object(value: object) -> Mapping[str, object]:
-    """Normalize an optional metadata object to an immutable-facing mapping."""
-    return {} if value is None else _object(value, "metadata")
-
-
 def _string(value: object, description: str) -> str:
     """Validate one string returned by the bridge."""
     if not isinstance(value, str):
@@ -915,31 +678,4 @@ def _command_result(value: object) -> CommandResult:
         stderr=_string(data.get("stderr"), "command stderr"),
         exit_code=_integer(data.get("exitCode"), "command exitCode"),
         duration_ms=_number(data.get("durationMs"), "command durationMs"),
-    )
-
-
-def _file_entry(value: object) -> FileEntry:
-    """Validate and normalize one TypeScript directory entry."""
-    data = _object(value, "directory entry")
-    entry_type = _string(data.get("type"), "directory entry type")
-    if entry_type not in {"file", "directory"}:
-        raise ComputeSDKError(f"ComputeSDK returned invalid file type {entry_type!r}")
-    size_value = data.get("size")
-    modified_value = data.get("modified")
-    return FileEntry(
-        name=_string(data.get("name"), "directory entry name"),
-        type=cast(Literal["file", "directory"], entry_type),
-        size=None if size_value is None else _number(size_value, "directory entry size"),
-        modified=None if modified_value is None else _string(modified_value, "directory entry modified time"),
-    )
-
-
-def _snapshot_info(value: object) -> SnapshotInfo:
-    """Validate and normalize one TypeScript snapshot result."""
-    data = _object(value, "snapshot")
-    return SnapshotInfo(
-        snapshot_id=_string(data.get("id"), "snapshot id"),
-        provider=_string(data.get("provider"), "snapshot provider"),
-        created_at=_string(data.get("createdAt"), "snapshot createdAt"),
-        metadata=_optional_object(data.get("metadata")),
     )

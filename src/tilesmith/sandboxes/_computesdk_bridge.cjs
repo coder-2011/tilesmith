@@ -6,16 +6,11 @@ const util = require("node:util");
 const { createRequire } = require("node:module");
 
 let compute;
-let computesdk;
-const providers = new Map();
 const sandboxes = new Map();
-const ownedSandboxIds = new Set();
 const createOperations = new Map();
 const destroyOperations = new Map();
 const maxResponseBytes = 128 * 1024 * 1024;
-const maxQueuedStreamBytes = 8 * 1024 * 1024;
 let outputQueue = Promise.resolve();
-let queuedStreamBytes = 0;
 let shuttingDown = false;
 
 /** Keep provider diagnostics away from the JSON-lines protocol on stdout. */
@@ -53,17 +48,9 @@ function serialize(value) {
 function send(value) {
   let encoded = serialize(value);
   if (Buffer.byteLength(encoded) > maxResponseBytes) {
-    const id = value.id ?? value.requestId;
-    encoded = serialize({ id, error: { name: "RangeError", message: "ComputeSDK response exceeds 128 MiB" } });
+    encoded = serialize({ id: value.id, error: { name: "RangeError", message: "ComputeSDK response exceeds 128 MiB" } });
   }
   const line = `${encoded}\n`;
-  const size = Buffer.byteLength(line);
-  if (value.event && queuedStreamBytes + size > maxQueuedStreamBytes) {
-    return Promise.resolve();
-  }
-  if (value.event) {
-    queuedStreamBytes += size;
-  }
   const completion = outputQueue.then(() => new Promise((resolve, reject) => {
     if (process.stdout.write(line)) {
       resolve();
@@ -81,80 +68,37 @@ function send(value) {
     process.stdout.once("error", onError);
   }));
   outputQueue = completion.catch(() => {});
-  return completion.finally(() => {
-    if (value.event) {
-      queuedStreamBytes -= size;
-    }
-  });
+  return completion;
 }
 
-/** Return the stable identity needed to reconstruct a Python Sandbox handle. */
-function describeSandbox(sandbox) {
-  return { sandboxId: sandbox.sandboxId, provider: sandbox.provider };
-}
-
-/** Strip provider-native objects from ComputeSDK's universal snapshot result. */
-function describeSnapshot(snapshot) {
-  return {
-    id: snapshot.id,
-    provider: snapshot.provider,
-    createdAt: snapshot.createdAt,
-    metadata: snapshot.metadata,
-  };
-}
-
-/** Resolve a sandbox handle, reconnecting through ComputeSDK when necessary. */
-async function getSandbox(sandboxId) {
-  let sandbox = sandboxes.get(sandboxId);
-  if (!sandbox) {
-    sandbox = await compute.sandbox.getById(sandboxId);
-    if (sandbox) {
-      sandboxes.set(sandboxId, sandbox);
-    }
-  }
+/** Resolve a sandbox created and owned by this bridge. */
+function getSandbox(sandboxId) {
+  const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) {
     throw new Error(`Sandbox "${sandboxId}" was not found`);
   }
   return sandbox;
 }
 
-/** Resolve a configured provider for provider-scoped template operations. */
-function getProvider(providerName) {
-  const provider = providers.get(providerName);
-  if (!provider) {
-    throw new Error(`Provider "${providerName}" is not configured`);
-  }
-  return provider;
-}
-
-/** Load provider factories and create one isolated ComputeSDK manager. */
+/** Load the selected provider factory and create one isolated ComputeSDK manager. */
 async function configure(request) {
   const load = packageLoader();
-  computesdk = load("computesdk");
-  const configured = [];
-  for (const specification of request.providers) {
-    const module = load(specification.package);
-    const factory = module[specification.factory];
-    if (typeof factory !== "function") {
-      throw new Error(`${specification.package} does not export provider factory "${specification.factory}"`);
-    }
-    const provider = await factory(specification.config || {});
-    if (!provider || typeof provider !== "object" || typeof provider.name !== "string") {
-      throw new Error(`${specification.package}.${specification.factory} did not return a ComputeSDK provider`);
-    }
-    // ComputeSDK keeps the first provider with a given name; template routing must agree.
-    if (providers.has(provider.name)) {
-      continue;
-    }
-    configured.push(provider);
-    providers.set(provider.name, provider);
+  const specification = request.provider;
+  const module = load(specification.package);
+  const factory = module[specification.factory];
+  if (typeof factory !== "function") {
+    throw new Error(`${specification.package} does not export provider factory "${specification.factory}"`);
   }
-  compute = computesdk.compute({
-    providers: configured,
-    providerStrategy: request.providerStrategy,
-    fallbackOnError: request.fallbackOnError,
+  const provider = await factory(specification.config || {});
+  if (!provider || typeof provider !== "object" || typeof provider.name !== "string") {
+    throw new Error(`${specification.package}.${specification.factory} did not return a ComputeSDK provider`);
+  }
+  compute = load("computesdk").compute({
+    providers: [provider],
+    providerStrategy: "priority",
+    fallbackOnError: true,
   });
-  return { providers: configured.map((provider) => provider.name) };
+  return null;
 }
 
 /** Abort and settle sandbox creations before process-level cleanup starts. */
@@ -182,14 +126,8 @@ async function destroySandboxById(sandboxId) {
   let operation = destroyOperations.get(sandboxId);
   if (!operation) {
     operation = (async () => {
-      const sandbox = sandboxes.get(sandboxId);
-      if (sandbox) {
-        await terminateSandbox(sandbox);
-      } else {
-        await compute.sandbox.destroy(sandboxId);
-      }
+      await terminateSandbox(getSandbox(sandboxId));
       sandboxes.delete(sandboxId);
-      ownedSandboxIds.delete(sandboxId);
     })();
     destroyOperations.set(sandboxId, operation);
   }
@@ -204,7 +142,7 @@ async function destroySandboxById(sandboxId) {
 
 /** Destroy every sandbox created by this bridge before the Node process exits. */
 async function destroyOwnedSandboxes() {
-  const results = await Promise.allSettled([...ownedSandboxIds].map(async (sandboxId) => {
+  const results = await Promise.allSettled([...sandboxes.keys()].map(async (sandboxId) => {
     await destroySandboxById(sandboxId);
   }));
   const failures = results.filter((result) => result.status === "rejected");
@@ -245,8 +183,7 @@ async function dispatch(request) {
         const options = { ...(request.options || {}), signal: controller.signal };
         const sandbox = await compute.sandbox.create(options);
         sandboxes.set(sandbox.sandboxId, sandbox);
-        ownedSandboxIds.add(sandbox.sandboxId);
-        return describeSandbox(sandbox);
+        return { sandboxId: sandbox.sandboxId, provider: sandbox.provider };
       } finally {
         finish();
         createOperations.delete(request.id);
@@ -260,42 +197,17 @@ async function dispatch(request) {
       }
       return null;
     }
-    case "getById": {
-      const sandbox = await compute.sandbox.getById(request.sandboxId);
-      if (!sandbox) {
-        return null;
-      }
-      sandboxes.set(sandbox.sandboxId, sandbox);
-      return describeSandbox(sandbox);
-    }
-    case "listSandboxes": {
-      const listed = await compute.sandbox.list();
-      for (const sandbox of listed) {
-        sandboxes.set(sandbox.sandboxId, sandbox);
-      }
-      return listed.map(describeSandbox);
-    }
-    case "destroySandbox":
-      await destroySandboxById(request.sandboxId);
-      return null;
     case "sandboxDestroy": {
-      await getSandbox(request.sandboxId);
+      getSandbox(request.sandboxId);
       await destroySandboxById(request.sandboxId);
       return null;
     }
     case "runCommand": {
-      const sandbox = await getSandbox(request.sandboxId);
-      const options = { ...(request.options || {}) };
-      if (request.streamStdout) {
-        options.onStdout = (data) => void send({ event: "stdout", requestId: request.id, data });
-      }
-      if (request.streamStderr) {
-        options.onStderr = (data) => void send({ event: "stderr", requestId: request.id, data });
-      }
-      return sandbox.runCommand(request.command, options);
+      const sandbox = getSandbox(request.sandboxId);
+      return sandbox.runCommand(request.command, request.options || {});
     }
     case "sandboxWaitUntilReady": {
-      const sandbox = await getSandbox(request.sandboxId);
+      const sandbox = getSandbox(request.sandboxId);
       const instance = typeof sandbox.getInstance === "function" ? sandbox.getInstance() : undefined;
       const nativeSandbox = instance?.sandbox ?? instance;
       if (nativeSandbox && typeof nativeSandbox.waitUntilReady === "function") {
@@ -308,60 +220,13 @@ async function dispatch(request) {
       }
       return null;
     }
-    case "getInfo":
-      return (await getSandbox(request.sandboxId)).getInfo();
-    case "getUrl":
-      return (await getSandbox(request.sandboxId)).getUrl(request.options);
     case "readFile":
-      return (await getSandbox(request.sandboxId)).filesystem.readFile(request.path);
+      return getSandbox(request.sandboxId).filesystem.readFile(request.path);
     case "writeFile":
-      await (await getSandbox(request.sandboxId)).filesystem.writeFile(request.path, request.content);
+      await getSandbox(request.sandboxId).filesystem.writeFile(request.path, request.content);
       return null;
-    case "mkdir":
-      await (await getSandbox(request.sandboxId)).filesystem.mkdir(request.path);
-      return null;
-    case "readdir":
-      return (await getSandbox(request.sandboxId)).filesystem.readdir(request.path);
     case "exists":
-      return (await getSandbox(request.sandboxId)).filesystem.exists(request.path);
-    case "remove":
-      await (await getSandbox(request.sandboxId)).filesystem.remove(request.path);
-      return null;
-    case "createSnapshot":
-      return describeSnapshot(await compute.snapshot.create(request.sandboxId, request.options));
-    case "listSnapshots":
-      return (await compute.snapshot.list()).map(describeSnapshot);
-    case "deleteSnapshot":
-      await compute.snapshot.delete(request.snapshotId);
-      return null;
-    case "createTemplate": {
-      const manager = getProvider(request.provider).template;
-      if (!manager) {
-        throw new Error(`Provider "${request.provider}" does not support templates`);
-      }
-      return manager.create(request.options);
-    }
-    case "listTemplates": {
-      const manager = getProvider(request.provider).template;
-      if (!manager) {
-        throw new Error(`Provider "${request.provider}" does not support templates`);
-      }
-      return manager.list(request.options);
-    }
-    case "deleteTemplate": {
-      const manager = getProvider(request.provider).template;
-      if (!manager) {
-        throw new Error(`Provider "${request.provider}" does not support templates`);
-      }
-      await manager.delete(request.templateId);
-      return null;
-    }
-    case "daemonSeedScript":
-      return computesdk.daemonSeedScript(request.config);
-    case "daemonSeedScriptCommand":
-      return computesdk.daemonSeedScriptCommand(request.config, request.payload);
-    case "parseSeedInvocationOutput":
-      return computesdk.parseSeedInvocationOutput(request.output);
+      return getSandbox(request.sandboxId).filesystem.exists(request.path);
     case "close":
       await abortCreateOperations();
       await destroyOwnedSandboxes();
