@@ -437,9 +437,16 @@ class TilesmithAgentTests(unittest.TestCase):
     # test_compute_bridge_rejects_ambiguous_values covers protocol safety edges together.
     def test_compute_bridge_rejects_ambiguous_values(self):
         """Reject ambiguous JSON values and invalid request deadlines."""
-        from tilesmith.sandboxes.computesdk import _Bridge, _json_bytes, _redact
+        from tilesmith.sandboxes.computesdk import (
+            _Bridge,
+            _json_bytes,
+            _prepare_redactions,
+            _redact_value,
+        )
 
-        self.assertEqual(_redact("abcdef", ("abc", "abcdef")), "[REDACTED]")
+        redactions = _prepare_redactions(("abc", "abcdef", "api key/value"))
+        value = {"api+key%2Fvalue": ["abcdef"]}
+        self.assertEqual(_redact_value(value, redactions), {"[REDACTED]": ["[REDACTED]"]})
         with self.assertRaisesRegex(ValueError, "JSON serializable"):
             _json_bytes({"value": float("nan")})
 

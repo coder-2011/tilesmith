@@ -130,7 +130,8 @@ class _Bridge:
         self._provider_strategy = provider_strategy
         self._fallback_on_error = fallback_on_error
         self._request_timeout = request_timeout
-        self._redactions = tuple(value for provider in providers for value in _config_strings(provider.config))
+        config_strings = tuple(value for provider in providers for value in _config_strings(provider.config))
+        self._redactions = _prepare_redactions(config_strings)
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -203,12 +204,14 @@ class _Bridge:
         request_timeout = self._request_timeout if timeout is None else timeout
         if not math.isfinite(request_timeout) or request_timeout <= 0:
             raise ValueError("ComputeSDK request timeout must be finite and positive")
-        # Provider diagnostics may mention request secrets after their response has completed.
-        self._redactions = tuple(dict.fromkeys((*self._redactions, *redactions)))
+        if redactions:
+            # Provider diagnostics may mention request secrets after their response has completed.
+            request_redactions = _prepare_redactions(redactions)
+            self._redactions = tuple(sorted({*self._redactions, *request_redactions}, key=len, reverse=True))
         process = self._process
         if process is None or process.stdin is None or process.returncode is not None:
             message = self._process_failure("ComputeSDK bridge is not running")
-            raise ComputeSDKError(_redact(message, (*self._redactions, *redactions)))
+            raise ComputeSDKError(message)
 
         loop = asyncio.get_running_loop()
         request_id = self._next_id
@@ -217,7 +220,7 @@ class _Bridge:
         self._next_id += 1
         pending = _Pending(
             future=loop.create_future(),
-            redactions=(*self._redactions, *redactions),
+            redactions=self._redactions,
             on_stdout=on_stdout,
             on_stderr=on_stderr,
         )
@@ -794,24 +797,28 @@ def _mapping_values(value: object) -> tuple[str, ...]:
     return tuple(item for item in values if isinstance(item, str) and item)
 
 
-def _redact(message: str, secrets: Sequence[str]) -> str:
-    """Replace secrets longest-first so overlapping values cannot expose suffixes."""
+def _prepare_redactions(secrets: Sequence[str]) -> tuple[str, ...]:
+    """Expand raw secrets into longest-first plain and URL-encoded variants."""
     variants = {variant for secret in secrets if secret for variant in (secret, quote(secret, safe=""), quote_plus(secret))}
-    ordered = sorted(variants, key=len, reverse=True)
-    for secret in ordered:
+    return tuple(sorted(variants, key=len, reverse=True))
+
+
+def _redact(message: str, redactions: Sequence[str]) -> str:
+    """Replace prepared variants longest-first so overlaps cannot expose suffixes."""
+    for secret in redactions:
         message = message.replace(secret, "[REDACTED]")
     return message
 
 
-# _redact_value removes known secrets from every string in a returned JSON value.
-def _redact_value(value: object, secrets: Sequence[str]) -> object:
+# _redact_value removes prepared variants from every string in a returned JSON value.
+def _redact_value(value: object, redactions: Sequence[str]) -> object:
     """Recursively redact successful responses as well as failures and streams."""
     if isinstance(value, str):
-        return _redact(value, secrets)
+        return _redact(value, redactions)
     if isinstance(value, list):
-        return [_redact_value(item, secrets) for item in value]
+        return [_redact_value(item, redactions) for item in value]
     if isinstance(value, dict):
-        return {_redact(key, secrets): _redact_value(item, secrets) for key, item in value.items()}
+        return {_redact(key, redactions): _redact_value(item, redactions) for key, item in value.items()}
     return value
 
 

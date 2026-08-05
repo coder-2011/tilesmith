@@ -578,10 +578,10 @@ class _LazyKernel:
 
 # _canonical_source removes PyTorch's incrementing, non-executable AOT ID comment.
 def _canonical_source(source):
-    first_line, separator, remainder = source.partition("\n")
-    if first_line.startswith("# AOT ID:"):
-        return remainder if separator else ""
-    return source
+    if not source.startswith("# AOT ID:"):
+        return source
+    _, _, remainder = source.partition("\n")
+    return remainder
 
 
 # _with_reference places the current FX/PyTorch program above executable generated source as comments.
