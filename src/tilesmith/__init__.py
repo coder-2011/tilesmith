@@ -185,11 +185,7 @@ class _LoopState(TypedDict):
 # benchmarks snapshots all completed graph timings attached by compile.
 def benchmarks(compiled):
     """Return immutable per-graph results after the compiled callable has run."""
-    try:
-        results = compiled._tilesmith_benchmarks
-    except AttributeError as error:
-        raise TypeError("compiled callable was not created by tilesmith.compile") from error
-    return tuple(results)
+    return tuple(getattr(compiled, "_tilesmith_benchmarks", ()))
 
 
 # compile returns a normal torch.compile callable while routing Inductor graphs through Tilesmith.

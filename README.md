@@ -9,7 +9,11 @@ installs only a numerically correct, independently confirmed speedup.
 ```python
 import tilesmith
 
-optimized_model = tilesmith.compile(model, example_inputs=(x,))
+optimized_model = tilesmith.compile(
+    model,
+    example_inputs=(x,),
+    agent_model="gpt-5.5",
+)
 output = optimized_model(x)
 
 for result in tilesmith.benchmarks(optimized_model):
@@ -28,12 +32,19 @@ Triton, then install Tilesmith and its agent runtime:
 ```sh
 python3 -m pip install tilesmith-ai
 export OPENAI_API_KEY=...
-export TILESMITH_MODEL=gpt-5.5
 ```
 
 `OPENROUTER_API_KEY` is supported as an alternative. An OpenAI-compatible
-gateway can be selected with `OPENAI_BASE_URL`; Tilesmith waits until the
-requested model appears in `/v1/models` before starting an optimization.
+gateway can be selected with `OPENAI_BASE_URL`. Without an API key, install
+and log in to `cliproxyapi` with Codex OAuth:
+
+```sh
+cliproxyapi -codex-login
+```
+
+Tilesmith detects the login at `~/.cli-proxy-api`; set
+`TILESMITH_CLIPROXYAPI_EXECUTABLE` or `TILESMITH_CLIPROXYAPI_AUTH_DIR` to
+override the executable or login directory.
 
 ## Compile from PyTorch
 
@@ -41,15 +52,22 @@ requested model appears in `/v1/models` before starting an optimization.
 optimized_model = tilesmith.compile(
     model,
     example_inputs=(x,),
+    agent_model="gpt-5.5",
     agency="medium",
     loops=1,
     max_model_calls=None,
 )
 ```
 
-`example_inputs` must be a tuple with at least one CUDA tensor. Compilation is
-lazy: PyTorch finishes compiling first, and the first real invocation supplies
-the concrete tensors used for Tilesmith's correctness and timing checks.
+`example_inputs` must be a tuple with at least one CUDA tensor. `agent_model`
+selects the optimizer model and overrides `TILESMITH_MODEL`; choose one offered
+by your API provider or Codex login. Compilation is lazy: PyTorch finishes
+compiling first, and the first real invocation supplies the concrete tensors
+used for Tilesmith's correctness and timing checks.
+
+When `example_inputs`, `agent_model`/`TILESMITH_MODEL`, or both the API-key and
+Codex-login routes are unavailable, `tilesmith.compile(...)` returns ordinary
+`torch.compile(...)`. `tilesmith.benchmarks(...)` then returns an empty tuple.
 
 `agency` controls how broadly the agent may alter generated code. `"low"`
 preserves the existing wrapper and kernel boundaries while allowing localized
@@ -109,10 +127,10 @@ receive their own track instead of being merged into one model-sized file.
 
 A new turn copies the most recently evaluated source. After `attempt_04.py`,
 the oldest contents are discarded and the other attempts shift down. Complete
-host reports and per-turn structured agent traces are retained beside the
-attempts under `profiles/`. An exact artifact-cache hit does not rerun the
-agent; its fresh run track contains `cache.json`, which identifies the reused
-artifact.
+host reports are retained beside the attempts under `profiles/`. Set
+`TILESMITH_DEBUG=1` to also retain per-turn structured agent traces. An exact
+artifact-cache hit does not rerun the agent; its fresh run track contains
+`cache.json`, which identifies the reused artifact.
 
 An agent final answer ends only that agent turn. The outer LangGraph does not
 finish a requested loop until the host:
