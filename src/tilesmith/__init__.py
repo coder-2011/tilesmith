@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
@@ -34,6 +34,7 @@ from .measurement import (
     clone_tensor_graph,
     variant_inputs,
 )
+from .sandboxes.computesdk import OFFICIAL_PROVIDER_VERSIONS, ProviderSpec
 
 ROOT = Path(__file__).resolve().parent
 WARMUP = 25
@@ -102,14 +103,11 @@ You may redesign the generated implementation when evidence supports it: rewrite
 
 @dataclass(frozen=True)
 class _ComputeConfig:
-    """Hold one ComputeSDK placement request and its credentials."""
+    """Hold one resolved ComputeSDK placement request."""
 
     chip: str
-    provider: str
-    provider_config: dict[str, object] = field(repr=False)
-    provider_factory: str
-    provider_package: str
-    provider_version: str
+    provider: ProviderSpec
+    provider_name: str
     sandbox_timeout: int
     template: str | None
 
@@ -250,15 +248,14 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
 
 # _read_compute_config validates a direct provider before provisioning a billable sandbox.
 def _read_compute_config(chip):
-    try:
-        from .sandboxes.computesdk import MODAL_VERSION, ProviderSpec
-    except ImportError as error:
-        raise RuntimeError("sandbox='computesdk' requires the bundled sandboxes package") from error
-
-    provider = os.environ.get("COMPUTESDK_PROVIDER") or "modal"
-    package = os.environ.get("COMPUTESDK_PROVIDER_PACKAGE") or f"@computesdk/{provider}"
-    factory = os.environ.get("COMPUTESDK_PROVIDER_FACTORY") or _provider_factory_name(provider)
-    version = os.environ.get("COMPUTESDK_PROVIDER_VERSION") or (MODAL_VERSION if provider == "modal" else "")
+    provider_name = os.environ.get("COMPUTESDK_PROVIDER") or "modal"
+    official_package = f"@computesdk/{provider_name}"
+    package = os.environ.get("COMPUTESDK_PROVIDER_PACKAGE") or official_package
+    factory = os.environ.get("COMPUTESDK_PROVIDER_FACTORY") or _provider_factory_name(provider_name)
+    version = os.environ.get("COMPUTESDK_PROVIDER_VERSION")
+    if not version and package == official_package:
+        # Official packages stay reproducible; custom packages must supply their own exact version.
+        version = OFFICIAL_PROVIDER_VERSIONS.get(provider_name)
     configured = os.environ.get("COMPUTESDK_PROVIDER_CONFIG")
     if configured:
         try:
@@ -267,33 +264,24 @@ def _read_compute_config(chip):
             raise ValueError("COMPUTESDK_PROVIDER_CONFIG must contain valid JSON") from error
         if not isinstance(provider_config, dict):
             raise ValueError("COMPUTESDK_PROVIDER_CONFIG must contain a JSON object")
-    elif provider == "modal":
-        token_id = os.environ.get("MODAL_TOKEN_ID", "")
-        token_secret = os.environ.get("MODAL_TOKEN_SECRET", "")
-        if not token_id or not token_secret:
-            raise ValueError("Modal ComputeSDK execution requires MODAL_TOKEN_ID and MODAL_TOKEN_SECRET")
-        provider_config = {"tokenId": token_id, "tokenSecret": token_secret}
     else:
         provider_config = {}
-    ProviderSpec(
+    provider = ProviderSpec(
         package=package,
         factory=factory,
-        version=version,
+        version=version or "",
         config=provider_config,
     )
     sandbox_timeout = int(os.environ.get("TILESMITH_SANDBOX_TIMEOUT", "3600"))
     if sandbox_timeout <= 60:
         raise ValueError("TILESMITH_SANDBOX_TIMEOUT must be greater than 60")
     template = os.environ.get("COMPUTESDK_TEMPLATE")
-    if template is None and provider == "modal":
+    if template is None and provider_name == "modal":
         template = DEFAULT_MODAL_TEMPLATE
     return _ComputeConfig(
         chip=chip,
         provider=provider,
-        provider_config=provider_config,
-        provider_factory=factory,
-        provider_package=package,
-        provider_version=version,
+        provider_name=provider_name,
         sandbox_timeout=sandbox_timeout,
         template=template,
     )
@@ -638,10 +626,10 @@ def _cache_key(source, settings, device, graph_key, skills):
         "compute": (
             {
                 "chip": settings.compute.chip,
-                "provider": settings.compute.provider,
-                "provider_factory": settings.compute.provider_factory,
-                "provider_package": settings.compute.provider_package,
-                "provider_version": settings.compute.provider_version,
+                "provider": settings.compute.provider_name,
+                "provider_factory": settings.compute.provider.factory,
+                "provider_package": settings.compute.provider.package,
+                "provider_version": settings.compute.provider.version,
                 "template": settings.compute.template,
             }
             if settings.compute is not None
@@ -894,17 +882,11 @@ class _ComputeSandbox:
 
     # __enter__ provisions once, uploads the worker, and verifies the selected GPU.
     def __enter__(self):
-        from .sandboxes.computesdk import ComputeSDKClient, ProviderSpec
+        from .sandboxes.computesdk import ComputeSDKClient
 
-        provider = ProviderSpec(
-            package=self.config.provider_package,
-            factory=self.config.provider_factory,
-            version=self.config.provider_version,
-            config=self.config.provider_config,
-        )
         self.runner = asyncio.Runner()
         self.client = ComputeSDKClient(
-            [provider],
+            [self.config.provider],
             request_timeout=min(300.0, self.command_timeout_ms / 1_000),
         )
         try:
@@ -917,7 +899,7 @@ class _ComputeSandbox:
                 options["templateId"] = self.config.template
             self.sandbox_scope = self.client.ephemeral_sandbox(
                 options,
-                provider=self.config.provider,
+                provider=self.config.provider_name,
                 request_timeout=self.readiness_timeout_ms / 1_000,
             )
             self.sandbox = self.runner.run(self.sandbox_scope.__aenter__())

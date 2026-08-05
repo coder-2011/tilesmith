@@ -173,10 +173,18 @@ called `extern_kernels.mm` and contained no Triton kernel. Reloading that exact
 source through Inductor's `PyCodeCache` preserved numerical parity, and the
 sandbox was destroyed after the check.
 
-Modal is the default provider. Other ComputeSDK providers can be selected with
-`COMPUTESDK_PROVIDER`, `COMPUTESDK_PROVIDER_PACKAGE`,
-`COMPUTESDK_PROVIDER_FACTORY`, `COMPUTESDK_PROVIDER_VERSION`, and
-`COMPUTESDK_PROVIDER_CONFIG`. `COMPUTESDK_TEMPLATE` selects an image and
+Modal is the default provider. To use another official ComputeSDK provider, set
+its name and normal credentials:
+
+```sh
+export COMPUTESDK_PROVIDER=e2b
+export E2B_API_KEY=...
+```
+
+Tilesmith selects a compatible pinned package automatically. The
+`COMPUTESDK_PROVIDER_PACKAGE`, `COMPUTESDK_PROVIDER_FACTORY`,
+`COMPUTESDK_PROVIDER_VERSION`, and `COMPUTESDK_PROVIDER_CONFIG` overrides remain
+available for custom providers. `COMPUTESDK_TEMPLATE` selects an image and
 `TILESMITH_SANDBOX_TIMEOUT` bounds the sandbox lifetime.
 
 ## Verified end-to-end result

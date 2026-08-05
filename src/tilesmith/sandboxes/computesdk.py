@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
 import shutil
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -23,6 +24,23 @@ from urllib.parse import quote, quote_plus
 COMPUTESDK_COMMIT = "0cf74653ea2d448074054662d90880bc22eb3a4f"
 COMPUTESDK_VERSION = "4.1.4"
 MODAL_VERSION = "1.9.4"
+# These official provider releases all depend on the pinned ComputeSDK core above.
+OFFICIAL_PROVIDER_VERSIONS = {
+    "archil": "0.4.7",
+    "blaxel": "1.6.18",
+    "cloudflare": "1.6.14",
+    "codesandbox": "1.5.51",
+    "daytona": "1.7.32",
+    "declaw": "0.2.8",
+    "e2b": "1.7.52",
+    "hopx": "0.2.27",
+    "modal": MODAL_VERSION,
+    "namespace": "1.6.14",
+    "runloop": "1.3.54",
+    "tensorlake": "0.1.9",
+    "upstash": "0.3.9",
+    "vercel": "1.7.31",
+}
 JUST_BASH_VERSION = "0.4.15"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
 _BRIDGE_RESPONSE_LIMIT_BYTES = 128 * 1024 * 1024
@@ -131,7 +149,7 @@ class _Bridge:
         self._fallback_on_error = fallback_on_error
         self._request_timeout = request_timeout
         config_strings = tuple(value for provider in providers for value in _config_strings(provider.config))
-        self._redactions = _prepare_redactions(config_strings)
+        self._redactions = _prepare_redactions((*config_strings, *_environment_secrets()))
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -795,6 +813,13 @@ def _mapping_values(value: object) -> tuple[str, ...]:
         return ()
     values = cast(Mapping[object, object], value).values()
     return tuple(item for item in values if isinstance(item, str) and item)
+
+
+# _environment_secrets protects credentials read directly by provider packages.
+def _environment_secrets() -> tuple[str, ...]:
+    """Collect values from environment variables conventionally named as secrets."""
+    secret_parts = {"CREDENTIAL", "KEY", "PASSWORD", "SECRET", "TOKEN"}
+    return tuple(value for name, value in os.environ.items() if value and secret_parts.intersection(name.upper().split("_")))
 
 
 def _prepare_redactions(secrets: Sequence[str]) -> tuple[str, ...]:

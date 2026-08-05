@@ -212,30 +212,24 @@ async def _run_remote(model, chip):
     """Provision one requested GPU, run the worker, and always tear it down."""
     from tilesmith import _read_compute_config
     from tilesmith.measurement import chip_matches
-    from tilesmith.sandboxes.computesdk import ComputeSDKClient, ProviderSpec
+    from tilesmith.sandboxes.computesdk import ComputeSDKClient
 
     if not chip_matches(chip, chip):
         raise ValueError("chip must contain a GPU model such as L4, H100, or B200")
     config = _read_compute_config(chip)
     manifest = _upload_manifest()
     agent_environment = _agent_environment(model)
-    provider = ProviderSpec(
-        package=config.provider_package,
-        factory=config.provider_factory,
-        version=config.provider_version,
-        config=config.provider_config,
-    )
     options = {
         "gpu": config.chip,
         "timeout": config.sandbox_timeout * 1_000,
     }
     if config.template is not None:
         options["templateId"] = config.template
-    async with ComputeSDKClient([provider]) as client:
+    async with ComputeSDKClient([config.provider]) as client:
         readiness_timeout = config.readiness_timeout_ms
         async with client.ephemeral_sandbox(
             options,
-            provider=config.provider,
+            provider=config.provider_name,
             request_timeout=readiness_timeout / 1_000,
         ) as sandbox:
             print(

@@ -399,6 +399,31 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(result, "sandbox-destroyed")
         self.assertEqual(events, ["sandbox-destroyed", "client-closed", "runner-closed"])
 
+    # test_compute_config_resolves_official_providers protects the one-name provider path.
+    def test_compute_config_resolves_official_providers(self):
+        """Resolve official providers without TileSmith-specific credential translation."""
+        with patch.dict("os.environ", {"COMPUTESDK_PROVIDER": "e2b"}, clear=True):
+            config = tilesmith._read_compute_config("L4")
+
+        self.assertEqual(config.provider_name, "e2b")
+        self.assertEqual(config.provider.package, "@computesdk/e2b")
+        self.assertEqual(config.provider.factory, "e2b")
+        self.assertEqual(config.provider.version, "1.7.52")
+        self.assertEqual(config.provider.config, {})
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "COMPUTESDK_PROVIDER": "acme",
+                    "COMPUTESDK_PROVIDER_PACKAGE": "acme-compute",
+                },
+                clear=True,
+            ),
+            self.assertRaisesRegex(ValueError, "version must be explicit"),
+        ):
+            tilesmith._read_compute_config("L4")
+
     # test_compute_bridge_accepts_large_responses protects generated-source and trace reads.
     def test_compute_bridge_accepts_large_responses(self):
         """Configure the bridge for bounded large generated-source responses."""
@@ -441,6 +466,7 @@ class TilesmithAgentTests(unittest.TestCase):
             _Bridge,
             _json_bytes,
             _prepare_redactions,
+            _redact,
             _redact_value,
         )
 
@@ -450,7 +476,9 @@ class TilesmithAgentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "JSON serializable"):
             _json_bytes({"value": float("nan")})
 
-        bridge = _Bridge((), "priority", True, 1.0)
+        with patch.dict("os.environ", {"E2B_API_KEY": "provider-secret"}, clear=True):
+            bridge = _Bridge((), "priority", True, 1.0)
+        self.assertEqual(_redact("leaked provider-secret", bridge._redactions), "leaked [REDACTED]")
         with self.assertRaisesRegex(ValueError, "finite and positive"):
             asyncio.run(bridge.call("noop", timeout=0))
 
