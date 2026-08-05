@@ -11,10 +11,14 @@ import tilesmith
 
 optimized_model = tilesmith.compile(model, example_inputs=(x,))
 output = optimized_model(x)
+
+for result in tilesmith.benchmarks(optimized_model):
+    print(result.torch_inductor_ms, result.tilesmith_ms, result.speedup)
 ```
 
 `optimized_model` remains a normal `torch.compile` callable. Tilesmith does not
-replace PyTorch or ask the model to rewrite the user's module.
+replace PyTorch or ask the model to rewrite the user's module. Benchmark results
+appear after the first call because optimization is lazy.
 
 ## Install
 
@@ -121,4 +125,3 @@ finish a requested loop until the host:
 5. sees the confirmation clear the same speedup threshold.
 
 We also offer the option to test implementations in sandboxes to return speed, or used to loops.
-
