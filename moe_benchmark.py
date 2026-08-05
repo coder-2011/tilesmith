@@ -125,7 +125,11 @@ async def _read_log_chunk(sandbox, path, offset):
         "print(base64.b64encode(data).decode())\n"
     )
     command = shlex.join(["python3", "-c", script, path, str(offset), str(LOG_CHUNK_BYTES)])
-    result = await sandbox.run_command(command, timeout_ms=60_000)
+    result = await sandbox.run_command(
+        command,
+        timeout_ms=60_000,
+        redact_output=False,
+    )
     _require_success(result, f"read remote log {path}")
     data = base64.b64decode(result.stdout.strip(), validate=True)
     return data.decode("utf-8", errors="replace"), len(data)

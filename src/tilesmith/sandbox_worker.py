@@ -225,7 +225,14 @@ def _compare(torch, triton):
         ROOT / "candidate.py",
         candidate_constants,
     )
-    assert_candidate_matches(torch, baseline, candidate, inputs)
+    assert_candidate_matches(
+        torch,
+        baseline,
+        candidate,
+        inputs,
+        reference_constants=baseline_constants,
+        candidate_constants=candidate_constants,
+    )
     torch.cuda.synchronize()
 
     metadata.update(
@@ -240,7 +247,14 @@ def _compare(torch, triton):
             int(request["samples"]),
         )
     )
-    assert_candidate_matches(torch, baseline, candidate, inputs)
+    assert_candidate_matches(
+        torch,
+        baseline,
+        candidate,
+        inputs,
+        reference_constants=baseline_constants,
+        candidate_constants=candidate_constants,
+    )
     assert_tensor_graph_matches(
         torch,
         candidate_constants,

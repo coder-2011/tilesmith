@@ -9,10 +9,24 @@ import statistics
 # chip_matches compares provider selectors and device names by exact GPU model token.
 def chip_matches(requested, observed):
     """Return whether two GPU descriptions share an exact model token."""
-    pattern = r"[a-z]+\d+[a-z]*"
-    requested_tokens = set(re.findall(pattern, requested.rstrip("!").lower()))
-    observed_tokens = set(re.findall(pattern, observed.lower()))
-    return bool(requested_tokens & observed_tokens)
+    requested = requested.rstrip("!").lower()
+    observed = observed.lower()
+    compact_pattern = r"[a-z]+\d+[a-z]*"
+    requested_compact = set(re.findall(compact_pattern, requested))
+    observed_compact = set(re.findall(compact_pattern, observed))
+    if requested_compact & observed_compact:
+        return True
+    pattern = r"[a-z]+|\d+[a-z]*"
+    ignored = {"blackwell", "geforce", "gpu", "nvidia"}
+    requested_tokens = [token for token in re.findall(pattern, requested) if token not in ignored]
+    observed_tokens = [token for token in re.findall(pattern, observed) if token not in ignored]
+    requested_numbers = [index for index, token in enumerate(requested_tokens) if token[0].isdigit()]
+    if not requested_numbers:
+        return False
+    model_end = requested_numbers[0] + 1
+    model = requested_tokens[:model_end]
+    width = len(model)
+    return any(observed_tokens[index : index + width] == model for index in range(len(observed_tokens) - width + 1))
 
 
 # clone_tensor_graph copies one object graph while retaining tensor storage aliases and views.
@@ -67,12 +81,17 @@ def assert_tensor_graph_matches(torch, actual, expected, label="tensor graph"):
         torch.testing.assert_close(actual, expected, equal_nan=True, check_stride=True)
         if actual.storage_offset() != expected.storage_offset():
             raise AssertionError(f"{label} changed a tensor storage offset")
+        if actual.requires_grad != expected.requires_grad:
+            raise AssertionError(f"{label} changed tensor autograd attachment")
+        if actual.is_conj() != expected.is_conj():
+            raise AssertionError(f"{label} changed lazy conjugation state")
+        _assert_signed_zero_matches(torch, actual, expected, label)
         return
     if type(actual) is not type(expected):
         raise AssertionError(f"{label} changed container type")
     if isinstance(actual, dict):
-        if actual.keys() != expected.keys():
-            raise AssertionError(f"{label} changed mapping keys")
+        if tuple(actual) != tuple(expected):
+            raise AssertionError(f"{label} changed mapping keys or order")
         for key in actual:
             assert_tensor_graph_matches(torch, actual[key], expected[key], label)
     elif isinstance(actual, (tuple, list)):
@@ -89,6 +108,23 @@ def assert_tensor_graph_matches(torch, actual, expected, label="tensor graph"):
         raise AssertionError(f"{label} changed a non-tensor value")
 
 
+# _assert_signed_zero_matches preserves the IEEE zero sign ignored by numerical closeness.
+def _assert_signed_zero_matches(torch, actual, expected, label):
+    """Reject sign-bit changes where both tensor components are exactly zero."""
+    if actual.is_complex():
+        components = ((actual.real, expected.real), (actual.imag, expected.imag))
+    elif actual.is_floating_point():
+        components = ((actual, expected),)
+    else:
+        return
+    for actual_part, expected_part in components:
+        both_zero = (actual_part == 0) & (expected_part == 0)
+        actual_signs = torch.signbit(actual_part) & both_zero
+        expected_signs = torch.signbit(expected_part) & both_zero
+        if not torch.equal(actual_signs, expected_signs):
+            raise AssertionError(f"{label} changed IEEE signed-zero semantics")
+
+
 # assert_tensor_aliases_match compares alias groups after values and layouts are checked.
 def assert_tensor_aliases_match(torch, actual, expected, label="tensor graph"):
     """Reject changes to repeated references, views, or shared tensor storage."""
@@ -100,20 +136,37 @@ def assert_tensor_aliases_match(torch, actual, expected, label="tensor graph"):
 def variant_inputs(torch, inputs, variant):
     """Return independent inputs with the original storage and view relationships."""
     values = clone_tensor_graph(torch, tuple(inputs))
-    original_tensors = _tensor_leaves(torch, inputs)
+    if variant == "normal":
+        return values
     cloned_tensors = _tensor_leaves(torch, values)
-    for original, cloned in zip(original_tensors, cloned_tensors, strict=True):
+    visited_storages = set()
+    for cloned in cloned_tensors:
+        storage = cloned.untyped_storage()
+        storage_key = (str(cloned.device), storage._cdata)
+        if storage_key in visited_storages:
+            continue
+        visited_storages.add(storage_key)
+        element_count = storage.nbytes() // cloned.element_size()
+        physical = cloned.new_empty(0).set_(storage, 0, (element_count,), (1,))
         if variant == "zero":
-            cloned.zero_()
-        elif variant == "high" and (cloned.is_floating_point() or cloned.is_complex()):
-            cloned.copy_(original * 4)
-        elif variant == "high" and cloned.dtype == torch.bool:
-            cloned.fill_(True)
+            physical.zero_()
+        elif variant == "high" and (physical.is_floating_point() or physical.is_complex()):
+            physical.mul_(4)
+        elif variant == "high" and physical.dtype == torch.bool:
+            physical.fill_(True)
     return values
 
 
 # assert_candidate_matches applies Tilesmith's shared numerical gate to one generated candidate.
-def assert_candidate_matches(torch, reference, candidate, inputs):
+def assert_candidate_matches(
+    torch,
+    reference,
+    candidate,
+    inputs,
+    *,
+    reference_constants=(),
+    candidate_constants=(),
+):
     """Compare values, mutation, aliases, and RNG transitions on shared variants."""
     with torch.no_grad():
         for variant in ("normal", "zero", "high"):
@@ -131,14 +184,14 @@ def assert_candidate_matches(torch, reference, candidate, inputs):
             actual_cuda_states = torch.cuda.get_rng_state_all()
             assert_tensor_graph_matches(
                 torch,
-                (actual_inputs, actual),
-                (expected_inputs, expected),
+                (actual_inputs, candidate_constants, actual),
+                (expected_inputs, reference_constants, expected),
                 "callable ABI",
             )
             assert_tensor_aliases_match(
                 torch,
-                (actual_inputs, actual),
-                (expected_inputs, expected),
+                (actual_inputs, candidate_constants, actual),
+                (expected_inputs, reference_constants, expected),
                 "callable ABI",
             )
             assert_tensor_graph_matches(

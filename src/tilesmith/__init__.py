@@ -4,7 +4,6 @@ import asyncio
 import base64
 import builtins
 import contextlib
-import fcntl
 import hashlib
 import importlib.metadata
 import inspect
@@ -637,7 +636,8 @@ def _cache_key(source, settings, device, graph_key, skills):
         "warmup": WARMUP,
     }
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode())
-    digest.update(source.encode())
+    _, executable_source = _split_reference(source)
+    digest.update(executable_source.encode())
     for path in [
         Path(__file__),
         ROOT / "sandboxes" / "computesdk.py",
@@ -658,11 +658,27 @@ def _cache_key(source, settings, device, graph_key, skills):
 @contextlib.contextmanager
 def _cache_lock(path):
     with path.open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            if not lock_file.read(1):
+                lock_file.write("\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _artifact_paths(cache_dir, cache_key):
@@ -814,7 +830,14 @@ class _Evaluator:
             candidate_constants = clone_tensor_graph(torch, self.constants)
             constant_snapshot = clone_tensor_graph(torch, candidate_constants)
             candidate = _load_call(candidate_path, candidate_constants, source_hash)
-            assert_candidate_matches(torch, self.baseline, candidate, self.inputs)
+            assert_candidate_matches(
+                torch,
+                self.baseline,
+                candidate,
+                self.inputs,
+                reference_constants=self.constants,
+                candidate_constants=candidate_constants,
+            )
             torch.cuda.synchronize(self.device)
             inputs = variant_inputs(torch, self.inputs, "normal")
             report = benchmark_pair(
@@ -827,7 +850,14 @@ class _Evaluator:
                 BENCH_ITERATIONS,
                 BENCH_SAMPLES,
             )
-            assert_candidate_matches(torch, self.baseline, candidate, self.inputs)
+            assert_candidate_matches(
+                torch,
+                self.baseline,
+                candidate,
+                self.inputs,
+                reference_constants=self.constants,
+                candidate_constants=candidate_constants,
+            )
             assert_tensor_graph_matches(
                 torch,
                 candidate_constants,

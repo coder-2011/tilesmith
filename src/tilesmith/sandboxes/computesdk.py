@@ -45,6 +45,7 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
 _BRIDGE_RESPONSE_LIMIT_BYTES = 128 * 1024 * 1024
 _BRIDGE_PATH = Path(__file__).with_name("_computesdk_bridge.cjs")
 _PACKAGE_PATTERN = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
+_SECRET_NAME_PARTS = frozenset({"CREDENTIAL", "KEY", "PASSWORD", "SECRET", "TOKEN"})
 
 StreamCallback = Callable[[str], None]
 
@@ -127,6 +128,7 @@ class _Pending:
 
     future: asyncio.Future[object]
     redactions: tuple[str, ...]
+    redact_result: bool
     on_stdout: StreamCallback | None
     on_stderr: StreamCallback | None
     callback_error: BaseException | None = None
@@ -214,6 +216,7 @@ class _Bridge:
         timeout: float | None = None,
         cancellable: bool = False,
         redactions: Sequence[str] = (),
+        redact_result: bool = True,
         on_stdout: StreamCallback | None = None,
         on_stderr: StreamCallback | None = None,
     ) -> object:
@@ -238,6 +241,7 @@ class _Bridge:
         pending = _Pending(
             future=loop.create_future(),
             redactions=self._redactions,
+            redact_result=redact_result,
             on_stdout=on_stdout,
             on_stderr=on_stderr,
         )
@@ -333,7 +337,10 @@ class _Bridge:
                 elif pending.callback_error is not None:
                     pending.future.set_exception(pending.callback_error)
                 else:
-                    pending.future.set_result(_redact_value(data.get("result"), pending.redactions))
+                    result = data.get("result")
+                    if pending.redact_result:
+                        result = _redact_value(result, pending.redactions)
+                    pending.future.set_result(result)
         except BaseException as error:
             self._fail_pending(error)
             if process.returncode is None:
@@ -641,10 +648,11 @@ class Sandbox:
         env: Mapping[str, str] | None = None,
         timeout_ms: int | None = None,
         background: bool = False,
+        redact_output: bool = True,
         on_stdout: StreamCallback | None = None,
         on_stderr: StreamCallback | None = None,
     ) -> CommandResult:
-        """Run one raw shell command with ComputeSDK's universal options."""
+        """Run one shell command, redacting its output unless it is an opaque transfer."""
         _nonempty(command, "command")
         if timeout_ms is not None and timeout_ms <= 0:
             raise ValueError("timeout_ms must be greater than zero")
@@ -666,7 +674,8 @@ class Sandbox:
                 "streamStderr": on_stderr is not None,
             },
             timeout=host_timeout,
-            redactions=tuple((env or {}).values()),
+            redactions=_mapping_values(env),
+            redact_result=redact_output,
             on_stdout=on_stdout,
             on_stderr=on_stderr,
         )
@@ -716,7 +725,11 @@ class Sandbox:
         """Read one UTF-8 file through the provider filesystem."""
         _nonempty(path, "path")
         try:
-            result = await self._bridge.call("readFile", {"sandboxId": self.sandbox_id, "path": path})
+            result = await self._bridge.call(
+                "readFile",
+                {"sandboxId": self.sandbox_id, "path": path},
+                redact_result=False,
+            )
         except ComputeSDKError as error:
             # Providers do not share a typed not-found error, so confirm absence explicitly.
             try:
@@ -807,18 +820,23 @@ def _config_strings(value: object) -> tuple[str, ...]:
 
 
 def _mapping_values(value: object) -> tuple[str, ...]:
-    """Return string values from an optional environment mapping."""
+    """Return secret-like string values from an optional environment mapping."""
     if not isinstance(value, Mapping):
         return ()
-    values = cast(Mapping[object, object], value).values()
-    return tuple(item for item in values if isinstance(item, str) and item)
+    items = cast(Mapping[object, object], value).items()
+    secrets = []
+    for name, item in items:
+        if not isinstance(name, str) or not isinstance(item, str) or not item:
+            continue
+        if _SECRET_NAME_PARTS.intersection(name.upper().split("_")):
+            secrets.append(item)
+    return tuple(secrets)
 
 
 # _environment_secrets protects credentials read directly by provider packages.
 def _environment_secrets() -> tuple[str, ...]:
     """Collect values from environment variables conventionally named as secrets."""
-    secret_parts = {"CREDENTIAL", "KEY", "PASSWORD", "SECRET", "TOKEN"}
-    return tuple(value for name, value in os.environ.items() if value and secret_parts.intersection(name.upper().split("_")))
+    return tuple(value for name, value in os.environ.items() if value and _SECRET_NAME_PARTS.intersection(name.upper().split("_")))
 
 
 def _prepare_redactions(secrets: Sequence[str]) -> tuple[str, ...]:
@@ -834,9 +852,9 @@ def _redact(message: str, redactions: Sequence[str]) -> str:
     return message
 
 
-# _redact_value removes prepared variants from every string in a returned JSON value.
+# _redact_value removes prepared variants from every string in a diagnostic JSON value.
 def _redact_value(value: object, redactions: Sequence[str]) -> object:
-    """Recursively redact successful responses as well as failures and streams."""
+    """Recursively redact successful values that are not opaque file transports."""
     if isinstance(value, str):
         return _redact(value, redactions)
     if isinstance(value, list):
