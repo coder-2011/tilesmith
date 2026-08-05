@@ -124,6 +124,7 @@ destroyed afterward.
 | `TILESMITH_TIMEOUT` | `1200` | Optimization timeout in seconds |
 | `TILESMITH_SANDBOX_TIMEOUT` | `3600` | ComputeSDK sandbox lifetime in seconds |
 | `TILESMITH_CACHE_DIR` | `~/.cache/tilesmith` | Cache and run evidence directory |
+| `TILESMITH_DEBUG` | unset | Set to `1` to retain complete per-turn agent traces |
 
 ## Cache and failures
 
@@ -131,6 +132,11 @@ Accepted implementations are stored under
 `~/.cache/tilesmith/artifacts/`. A later compile with the same generated graph
 and optimization settings reuses the artifact without rerunning the agent or
 starting a sandbox. Run evidence is kept under `~/.cache/tilesmith/runs/`.
+
+Set `TILESMITH_DEBUG=1` to save complete per-turn agent traces as
+`profiles/trace_00.json`, `trace_01.json`, and so on beneath that run directory.
+Traces can include generated source and tool arguments, so treat the cache
+directory as private. Cache hits do not create traces because no agent runs.
 
 If the agent, provider, validation, or timing step fails, Tilesmith warns and
 keeps the ordinary Inductor implementation. It never installs an unconfirmed

@@ -180,6 +180,10 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIn("Preserve the high-level algorithm", medium_prompt)
         self.assertIn("fuse, split, add, or remove kernels", high_prompt)
         self.assertEqual(tilesmith._read_settings(None, "").agency, "medium")
+        with patch.dict("os.environ", {"TILESMITH_DEBUG": "1"}):
+            self.assertTrue(tilesmith._read_settings(None, "").debug)
+        with patch.dict("os.environ", {"TILESMITH_DEBUG": "0"}):
+            self.assertFalse(tilesmith._read_settings(None, "").debug)
         with self.assertRaisesRegex(ValueError, "agency must be 'low', 'medium'"):
             tilesmith._read_settings(None, "", agency="unbounded")
 
@@ -627,6 +631,7 @@ class TilesmithAgentTests(unittest.TestCase):
             run_id="test-run",
             skills=(),
             timeout=10.0,
+            debug=True,
         )
         source = tilesmith._with_reference(
             "def forward(self, x):\n    return x",
@@ -695,6 +700,7 @@ class TilesmithAgentTests(unittest.TestCase):
             run_id="test-run",
             skills=(),
             timeout=10.0,
+            debug=True,
         )
         source = tilesmith._with_reference(
             "def forward(self, x):\n    return x",

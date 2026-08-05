@@ -64,13 +64,13 @@ The executable section is the canonical entry point for this graph. It may conta
 The local workspace has only two managed areas:
 
 - `/attempts/attempt_00.py` through `attempt_04.py` are five rolling candidate versions. The active attempt named in the user message is the only local file you may edit.
-- `/profiles/*.json` contains immutable host correctness/timing reports and complete agent traces. You may read these reports but must not modify or delete them.
+- `/profiles/*.json` contains immutable host correctness/timing reports and, when host debugging is enabled, complete agent traces. You may read these reports but must not modify or delete them.
 
 Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize, execute, remove, or edit that reference header. Never modify an inactive attempt.
 
 ## Turn lifecycle
 
-The host copies the latest evaluated candidate into the next active attempt, then asks you to improve that attempt. You edit it and finish your turn. The host restores the trusted FX header, evaluates that exact active attempt, records the report under `/profiles/`, and passes the report to the next turn. After every requested loop passes fresh confirmation, the host stores the accepted source in the shared artifact cache.
+The host copies the latest evaluated candidate into the next active attempt, then asks you to improve that attempt. You edit it and finish your turn. The host restores the trusted FX header, evaluates that exact active attempt, records the report under `/profiles/`, and passes the report to the next turn. When debugging is enabled, it also records the full turn trace there. After every requested loop passes fresh confirmation, the host stores the accepted source in the shared artifact cache.
 
 Use the graph's planning, file editing, subagent, and web-search capabilities whenever useful; choose your own workflow.
 Work on one coherent candidate per agent turn. Use targeted file searches and narrow reads instead of paging through the entire generated wrapper, validate the edit, then return a final response so the host can evaluate it and provide feedback.
@@ -133,6 +133,7 @@ class _Settings:
     run_id: str
     skills: tuple[str, ...]
     timeout: float
+    debug: bool = False
 
 
 @dataclass(frozen=True)
@@ -244,6 +245,7 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
         run_id=uuid.uuid4().hex,
         skills=tuple(_default_skills()),
         timeout=timeout,
+        debug=os.environ.get("TILESMITH_DEBUG") == "1",
     )
 
 
@@ -1912,16 +1914,17 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
             )
         messages = result.get("messages", [])
         call_count = call_counter.count
-        # Each trace owns one turn; cumulative files would duplicate history
-        # quadratically.
-        workspace.write_report(
-            f"trace_{state['turn']:02d}",
-            {
-                "messages": messages_to_dict(messages[message_cursor:]),
-                "model_call_limit_reached": limit_error is not None,
-                "model_calls": call_count,
-            },
-        )
+        if settings.debug:
+            # Each trace owns one turn; cumulative files would duplicate history
+            # quadratically.
+            workspace.write_report(
+                f"trace_{state['turn']:02d}",
+                {
+                    "messages": messages_to_dict(messages[message_cursor:]),
+                    "model_call_limit_reached": limit_error is not None,
+                    "model_calls": call_count,
+                },
+            )
         try:
             attempt_path, candidate = workspace.read_candidate(path)
         except (OSError, UnicodeError, ValueError) as error:
