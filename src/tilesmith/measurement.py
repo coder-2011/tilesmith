@@ -50,6 +50,24 @@ def _tensor_leaves(torch, value):
     return []
 
 
+# _tensor_versions captures observable in-place mutation without retaining tensors.
+def _tensor_versions(torch, value):
+    """Return each tensor's version counter, or None when it has no counter."""
+    versions = []
+    for tensor in _tensor_leaves(torch, value):
+        try:
+            versions.append(tensor._version)
+        except RuntimeError:
+            versions.append(None)
+    return tuple(versions)
+
+
+# _version_changes normalizes counters so independently cloned graphs can be compared.
+def _version_changes(before, after):
+    """Return the increment made to every available tensor version counter."""
+    return tuple(None if start is None or end is None else end - start for start, end in zip(before, after, strict=True))
+
+
 # _alias_signature describes storage sharing and layout without retaining raw addresses.
 def _alias_signature(torch, value):
     """Return a comparable storage-group signature for every tensor occurrence."""
@@ -78,11 +96,12 @@ def assert_tensor_graph_matches(torch, actual, expected, label="tensor graph"):
     if torch.is_tensor(actual) or torch.is_tensor(expected):
         if not torch.is_tensor(actual) or not torch.is_tensor(expected):
             raise AssertionError(f"{label} changed tensor structure")
+        if type(actual) is not type(expected):
+            raise AssertionError(f"{label} changed tensor type")
+        _assert_quantization_matches(torch, actual, expected, label)
         torch.testing.assert_close(actual, expected, equal_nan=True, check_stride=True)
         if actual.storage_offset() != expected.storage_offset():
             raise AssertionError(f"{label} changed a tensor storage offset")
-        if actual.requires_grad != expected.requires_grad:
-            raise AssertionError(f"{label} changed tensor autograd attachment")
         if actual.is_conj() != expected.is_conj():
             raise AssertionError(f"{label} changed lazy conjugation state")
         _assert_signed_zero_matches(torch, actual, expected, label)
@@ -106,6 +125,28 @@ def assert_tensor_graph_matches(torch, actual, expected, label="tensor graph"):
             )
     elif actual != expected:
         raise AssertionError(f"{label} changed a non-tensor value")
+
+
+# _assert_quantization_matches preserves the encoding metadata hidden by dequantized values.
+def _assert_quantization_matches(torch, actual, expected, label):
+    """Reject changes to a quantized tensor's scheme, scale, zero point, or axis."""
+    if actual.is_quantized != expected.is_quantized:
+        raise AssertionError(f"{label} changed tensor quantization")
+    if not actual.is_quantized:
+        return
+    qscheme = actual.qscheme()
+    if qscheme != expected.qscheme():
+        raise AssertionError(f"{label} changed tensor quantization scheme")
+    if qscheme in (torch.per_tensor_affine, torch.per_tensor_symmetric):
+        if actual.q_scale() != expected.q_scale() or actual.q_zero_point() != expected.q_zero_point():
+            raise AssertionError(f"{label} changed tensor quantization parameters")
+        return
+    if actual.q_per_channel_axis() != expected.q_per_channel_axis():
+        raise AssertionError(f"{label} changed tensor quantization axis")
+    if not torch.equal(actual.q_per_channel_scales(), expected.q_per_channel_scales()):
+        raise AssertionError(f"{label} changed tensor quantization scales")
+    if not torch.equal(actual.q_per_channel_zero_points(), expected.q_per_channel_zero_points()):
+        raise AssertionError(f"{label} changed tensor quantization zero points")
 
 
 # _assert_signed_zero_matches preserves the IEEE zero sign ignored by numerical closeness.
@@ -157,6 +198,40 @@ def variant_inputs(torch, inputs, variant):
     return values
 
 
+# _torch_process_state snapshots stable PyTorch policies a generated callable can mutate.
+def _torch_process_state(torch):
+    """Return caller-visible PyTorch process settings protected during evaluation."""
+    return {
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_enabled": torch.backends.cudnn.enabled,
+        "default_dtype": torch.get_default_dtype(),
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+        "fp16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction,
+    }
+
+
+# _restore_torch_process_state prevents validation trials from leaking policy changes.
+def _restore_torch_process_state(torch, state):
+    """Restore a process-state snapshot after one reference or candidate call."""
+    torch.backends.cudnn.allow_tf32 = state["cudnn_allow_tf32"]
+    torch.backends.cudnn.benchmark = state["cudnn_benchmark"]
+    torch.backends.cudnn.deterministic = state["cudnn_deterministic"]
+    torch.backends.cudnn.enabled = state["cudnn_enabled"]
+    torch.set_default_dtype(state["default_dtype"])
+    torch.use_deterministic_algorithms(
+        state["deterministic_algorithms"],
+        warn_only=state["deterministic_warn_only"],
+    )
+    torch.set_float32_matmul_precision(state["float32_matmul_precision"])
+    torch.backends.cuda.matmul.allow_tf32 = state["cuda_matmul_allow_tf32"]
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = state["fp16_reduced_precision_reduction"]
+
+
 # assert_candidate_matches applies Tilesmith's shared numerical gate to one generated candidate.
 def assert_candidate_matches(
     torch,
@@ -172,16 +247,34 @@ def assert_candidate_matches(
         for variant in ("normal", "zero", "high"):
             cpu_state = torch.random.get_rng_state()
             cuda_states = torch.cuda.get_rng_state_all()
-            expected_inputs = variant_inputs(torch, inputs, variant)
-            expected = reference(list(expected_inputs))
-            expected_cpu_state = torch.random.get_rng_state()
-            expected_cuda_states = torch.cuda.get_rng_state_all()
-            torch.random.set_rng_state(cpu_state)
-            torch.cuda.set_rng_state_all(cuda_states)
-            actual_inputs = variant_inputs(torch, inputs, variant)
-            actual = candidate(list(actual_inputs))
-            actual_cpu_state = torch.random.get_rng_state()
-            actual_cuda_states = torch.cuda.get_rng_state_all()
+            initial_process_state = _torch_process_state(torch)
+            try:
+                expected_inputs = variant_inputs(torch, inputs, variant)
+                expected_version_start = _tensor_versions(torch, (expected_inputs, reference_constants))
+                expected = reference(list(expected_inputs))
+                expected_versions = _version_changes(
+                    expected_version_start,
+                    _tensor_versions(torch, (expected_inputs, reference_constants)),
+                )
+                expected_cpu_state = torch.random.get_rng_state()
+                expected_cuda_states = torch.cuda.get_rng_state_all()
+                expected_process_state = _torch_process_state(torch)
+
+                torch.random.set_rng_state(cpu_state)
+                torch.cuda.set_rng_state_all(cuda_states)
+                _restore_torch_process_state(torch, initial_process_state)
+                actual_inputs = variant_inputs(torch, inputs, variant)
+                actual_version_start = _tensor_versions(torch, (actual_inputs, candidate_constants))
+                actual = candidate(list(actual_inputs))
+                actual_versions = _version_changes(
+                    actual_version_start,
+                    _tensor_versions(torch, (actual_inputs, candidate_constants)),
+                )
+                actual_cpu_state = torch.random.get_rng_state()
+                actual_cuda_states = torch.cuda.get_rng_state_all()
+                actual_process_state = _torch_process_state(torch)
+            finally:
+                _restore_torch_process_state(torch, initial_process_state)
             assert_tensor_graph_matches(
                 torch,
                 (actual_inputs, candidate_constants, actual),
@@ -200,6 +293,14 @@ def assert_candidate_matches(
                 (expected_cpu_state, expected_cuda_states),
                 "RNG transition",
             )
+            assert_tensor_graph_matches(
+                torch,
+                actual_process_state,
+                expected_process_state,
+                "PyTorch process-state transition",
+            )
+            if actual_versions != expected_versions:
+                raise AssertionError("callable ABI changed tensor version-counter transitions")
 
 
 # benchmark_pair returns fixed-policy paired CUDA-event samples and their median ratio.
@@ -216,25 +317,30 @@ def benchmark_pair(
     """Return finite positive paired CUDA-event samples and their median ratio."""
     functions = ((reference_name, reference), ("candidate_triton", candidate))
     input_snapshot = clone_tensor_graph(torch, inputs)
-    with torch.no_grad():
-        # Generated wrappers clear boxed inputs, so every invocation needs a fresh list.
-        for _ in range(warmup):
-            for _, measured in functions:
-                measured(list(inputs))
-        torch.cuda.synchronize()
-
-        samples = {name: [] for name, _ in functions}
-        for sample in range(sample_count):
-            order = functions if sample % 2 == 0 else tuple(reversed(functions))
-            for name, measured in order:
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                for _ in range(iterations):
+    process_state = _torch_process_state(torch)
+    try:
+        with torch.no_grad():
+            # Generated wrappers clear boxed inputs, so every invocation needs a fresh list.
+            for _ in range(warmup):
+                for _, measured in functions:
                     measured(list(inputs))
-                end.record()
-                end.synchronize()
-                samples[name].append(start.elapsed_time(end) / iterations)
+            torch.cuda.synchronize()
+
+            samples = {name: [] for name, _ in functions}
+            for sample in range(sample_count):
+                order = functions if sample % 2 == 0 else tuple(reversed(functions))
+                for name, measured in order:
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    for _ in range(iterations):
+                        measured(list(inputs))
+                    end.record()
+                    end.synchronize()
+                    samples[name].append(start.elapsed_time(end) / iterations)
+    finally:
+        # Timed candidate calls must not leak process-wide policy into the application.
+        _restore_torch_process_state(torch, process_state)
 
     assert_tensor_graph_matches(torch, inputs, input_snapshot, "timing inputs")
     assert_tensor_aliases_match(torch, inputs, input_snapshot, "timing inputs")

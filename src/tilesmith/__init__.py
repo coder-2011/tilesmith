@@ -20,11 +20,14 @@ import threading
 import time
 import uuid
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
 from .measurement import (
+    _restore_torch_process_state,
+    _torch_process_state,
     assert_candidate_matches,
     assert_tensor_aliases_match,
     assert_tensor_graph_matches,
@@ -63,14 +66,14 @@ The local workspace has only two managed areas:
 - `/attempts/attempt_00.py` through `attempt_04.py` are five rolling candidate versions. The active attempt named in the user message is the only local file you may edit.
 - `/profiles/*.json` contains immutable host correctness/timing reports and complete agent traces. You may read these reports but must not modify or delete them.
 
-Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize, execute, remove, or edit that reference header. Never modify an inactive attempt. Use `/tmp` only for disposable local scratch files.
+Every attempt starts with a trusted, non-executing comment copy of the current PyTorch FX graph. Never optimize, execute, remove, or edit that reference header. Never modify an inactive attempt.
 
 ## Turn lifecycle
 
 The host copies the latest evaluated candidate into the next active attempt, then asks you to improve that attempt. You edit it and finish your turn. The host restores the trusted FX header, evaluates that exact active attempt, records the report under `/profiles/`, and passes the report to the next turn. After every requested loop passes fresh confirmation, the host stores the accepted source in the shared artifact cache.
 
-Use the graph's planning, file editing, bash, subagent, and web-search capabilities whenever useful; choose your own workflow.
-Work on one coherent candidate per agent turn. Use targeted shell searches and narrow reads instead of paging through the entire generated wrapper, validate the edit, then return a final response so the host can evaluate it and provide feedback.
+Use the graph's planning, file editing, subagent, and web-search capabilities whenever useful; choose your own workflow.
+Work on one coherent candidate per agent turn. Use targeted file searches and narrow reads instead of paging through the entire generated wrapper, validate the edit, then return a final response so the host can evaluate it and provide feedback.
 Use read_exact_source for any text that will be copied into an edit or matched by a script. Unlike read_file, it returns the file's exact whitespace without line-number gutters.
 Use web search to resolve concrete Triton, PyTorch, or NVIDIA uncertainties, preferring primary documentation and source.
 Inspect the complete wrapper dataflow before editing. Under medium or high agency, you may replace or fuse external-library and generated-template regions with Triton when the agency policy permits it and measurement supports it. Keep runtime libraries as dependencies rather than copying their implementations into the attempt file.
@@ -423,10 +426,18 @@ class _LazyKernel:
         self.lock = threading.Condition()
         self.installing_thread = None
         self.owner = owner
+        self.pid = os.getpid()
 
     # __call__ installs exactly one validated artifact, then preserves Inductor's boxed calling convention.
     def __call__(self, inputs):
         """Install once, wait across threads, and use the baseline on recursive entry."""
+        if os.getpid() != self.pid:
+            # A child cannot safely resume locks held by threads that vanished at fork.
+            self.lock = threading.Condition()
+            self.installing_thread = None
+            if self.installed is None:
+                self.installed = self.baseline
+            self.pid = os.getpid()
         current_thread = threading.get_ident()
         install = False
         with self.lock:
@@ -462,10 +473,12 @@ class _LazyKernel:
                     self.owner = None
                 self.lock.notify_all()
             if error is not None:
-                warnings.warn(
-                    f"Tilesmith optimization failed; using ordinary Inductor: {_summarize(error)}",
-                    stacklevel=2,
-                )
+                # Warning filters must not turn an optional optimization into a model failure.
+                with contextlib.suppress(Warning):
+                    warnings.warn(
+                        f"Tilesmith optimization failed; using ordinary Inductor: {_summarize(error)}",
+                        stacklevel=2,
+                    )
         return target(inputs)
 
     # _install reuses a validated cache entry or runs the complete agent loop against these runtime inputs.
@@ -489,8 +502,21 @@ class _LazyKernel:
             self.graph_key,
             skills,
         )
-        self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = _read_cache(self.settings.cache_dir, cache_key)
+        if cached is not None:
+            # Per-run evidence is best-effort because loading uses already-verified bytes.
+            with contextlib.suppress(OSError):
+                _record_cache_hit(
+                    self.settings.cache_dir,
+                    self.settings.run_id,
+                    cache_key,
+                    cached.path,
+                )
+            if cached.source.decode("utf-8") == self.source:
+                return self.baseline
+            return _load_call_bytes(cached.source, self.constants)
 
+        self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.settings.cache_dir / "locks" / f"{cache_key}.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with _cache_lock(lock_path):
@@ -547,12 +573,13 @@ class _LazyKernel:
                     result.source,
                 )
             else:
-                _record_cache_hit(
-                    self.settings.cache_dir,
-                    self.settings.run_id,
-                    cache_key,
-                    cached.path,
-                )
+                with contextlib.suppress(OSError):
+                    _record_cache_hit(
+                        self.settings.cache_dir,
+                        self.settings.run_id,
+                        cache_key,
+                        cached.path,
+                    )
         if cached.source.decode("utf-8") == self.source:
             return self.baseline
         return _load_call_bytes(cached.source, self.constants)
@@ -606,6 +633,11 @@ def _cache_key(source, settings, device, graph_key, skills):
         "bench_samples": BENCH_SAMPLES,
         "capability": torch.cuda.get_device_capability(index),
         "cuda": str(torch.version.cuda),
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_enabled": torch.backends.cudnn.enabled,
         "deepagents": _package_version("deepagents"),
         "device": torch.cuda.get_device_name(index),
         "langchain_openai": _package_version("langchain-openai"),
@@ -616,7 +648,10 @@ def _cache_key(source, settings, device, graph_key, skills):
         "model": settings.model,
         "python": platform.python_version(),
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+        "default_dtype": str(torch.get_default_dtype()),
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
+        "fp16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction,
         "compute": (
             {
                 "chip": settings.compute.chip,
@@ -768,11 +803,19 @@ def _write_cache(cache_dir, cache_key, source):
 
 # _load_call imports accepted source with Inductor constants and an optional precomputed cache key.
 def _load_call(path, constants, source_hash=None):
+    import torch
     from torch._inductor.codecache import PyCodeCache, code_hash
 
     if source_hash is None:
         source_hash = code_hash(path.read_bytes())
-    module = PyCodeCache.load_by_key_path(source_hash, str(path), attrs=constants)
+    process_state = _torch_process_state(torch)
+    try:
+        module = PyCodeCache.load_by_key_path(source_hash, str(path), attrs=constants)
+    finally:
+        loaded_state = _torch_process_state(torch)
+        _restore_torch_process_state(torch, process_state)
+    if loaded_state != process_state:
+        raise AssertionError("candidate module changed process-global PyTorch state while loading")
     return module.call
 
 
@@ -885,6 +928,28 @@ class _Evaluator:
         self.directory.cleanup()
 
 
+class _AsyncThreadRunner:
+    """Run retained async resources on one worker thread and event loop."""
+
+    # __init__ creates a lazy asyncio runner and its single owning thread.
+    def __init__(self):
+        self.runner = asyncio.Runner()
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tilesmith-async")
+
+    # run blocks the synchronous caller while the worker thread advances one awaitable.
+    def run(self, awaitable):
+        """Run one awaitable without nesting inside the caller's event loop."""
+        return self.executor.submit(self.runner.run, awaitable).result()
+
+    # close tears down the event loop on the same thread that owns its async resources.
+    def close(self):
+        """Close the retained runner before joining its worker thread."""
+        try:
+            self.executor.submit(self.runner.close).result()
+        finally:
+            self.executor.shutdown()
+
+
 class _ComputeSandbox:
     """Own one reusable ComputeSDK sandbox for an entire graph optimization track."""
 
@@ -908,7 +973,7 @@ class _ComputeSandbox:
     def __enter__(self):
         from .sandboxes.computesdk import ComputeSDKClient
 
-        self.runner = asyncio.Runner()
+        self.runner = _AsyncThreadRunner()
         self.client = ComputeSDKClient(
             self.config.provider,
             request_timeout=min(300.0, self.command_timeout_ms / 1_000),
@@ -969,15 +1034,19 @@ class _ComputeSandbox:
     # _close awaits exact sandbox destruction before closing the provider bridge and event loop.
     def _close(self, error_info):
         """Close the sandbox, client, and retained event loop in ownership order."""
+        if self.runner is None:
+            return False
         result = False
         try:
             if self.sandbox is not None:
                 result = self.runner.run(self.sandbox_scope.__aexit__(*error_info))
         finally:
             try:
-                self.runner.run(self.client.__aexit__(*error_info))
+                if self.client is not None:
+                    self.runner.run(self.client.__aexit__(*error_info))
             finally:
                 self.runner.close()
+                self.runner = None
         return result
 
     # _command runs one provider-neutral ComputeSDK command on the retained event loop.
@@ -1260,6 +1329,7 @@ class _AttemptWorkspace:
             raise ValueError("agent source is missing its PyTorch FX reference header")
 
         self.attempts.mkdir(parents=True, exist_ok=True)
+        self._validate_managed_files()
         existing = [path for path in self.paths if path.is_file()]
         latest = max(existing, key=lambda path: path.stat().st_mtime_ns) if existing else self.paths[0]
         for path in self.paths:
@@ -1271,6 +1341,7 @@ class _AttemptWorkspace:
 
     # prepare_next copies the latest attempt into the next slot and rotates after attempt_04.
     def prepare_next(self):
+        self._validate_managed_files()
         source = self._read_source(self.latest)
         source = self._annotate(source)
         latest_index = self.paths.index(self.latest)
@@ -1287,6 +1358,7 @@ class _AttemptWorkspace:
 
     # read_candidate repairs one managed source without changing its recency or active cursor.
     def read_candidate(self, path):
+        self._validate_managed_files()
         normalized = f"/{path.lstrip('/')}"
         allowed = {self._virtual(candidate): candidate for candidate in self.paths}
         if normalized not in allowed:
@@ -1303,11 +1375,13 @@ class _AttemptWorkspace:
 
     # read_latest returns the normalized source currently shared with the GPU shell.
     def read_latest(self):
+        self._validate_managed_files()
         source = self._read_source(self.latest)
         return self._annotate(source)
 
     # write_latest accepts a GPU-shell edit while preserving the trusted FX reference.
     def write_latest(self, source):
+        self._validate_managed_files()
         if len(source.encode()) > MAX_SOURCE_BYTES:
             raise ValueError("remote candidate source exceeds 64 MiB")
         self.latest.write_text(self._annotate(source), encoding="utf-8")
@@ -1315,6 +1389,7 @@ class _AttemptWorkspace:
     # normalize_all repairs comment headers without changing which attempt is newest.
     def normalize_all(self):
         self.attempts.mkdir(parents=True, exist_ok=True)
+        self._validate_managed_files()
         fallback = self._read_source(self.latest) if self.latest.is_file() else self.baseline
         for path in self.paths:
             if not path.exists():
@@ -1327,6 +1402,15 @@ class _AttemptWorkspace:
                 path.write_text(annotated, encoding="utf-8")
                 os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         self.latest.touch()
+
+    # _validate_managed_files prevents host normalization from following agent-created links.
+    def _validate_managed_files(self):
+        """Reject symlinks and non-files in the host-owned attempt namespace."""
+        if self.attempts.is_symlink():
+            raise ValueError("attempts directory must not be a symlink")
+        for path in self.paths:
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise ValueError(f"attempt path must be a regular file: {path.name}")
 
     # write_report persists the complete host evaluation outside model history.
     def write_report(self, name, report):
@@ -1561,13 +1645,13 @@ def _agent_instructions(settings, evaluator, skills):
         AGENCY_PROMPTS[settings.agency],
         (
             "Execution facts:\n"
-            "- The Deep Agents graph, file tools, bash, subagents, and web search run "
-            "in the calling process.\n"
+            "- Local file tools are confined to the graph workspace; the Deep Agents "
+            "graph, subagents, and web search run in the calling process.\n"
             f"- Trusted candidate evaluation runs in {evaluator.execution}.\n"
             f"- The evaluator observed this exact target: {evaluator.chip}.\n"
             f"- The outer LangGraph requires {settings.loops} independently "
             "confirmed improvement loops.\n"
-            f"- The Deep Agent has {model_budget} across this track; shell and "
+            f"- The Deep Agent has {model_budget} across this track; non-model "
             "tool calls do not count as model calls.\n"
             "- The host evaluates the current attempt after every agent turn and "
             "persists complete reports under /profiles. A turn cannot complete a "
@@ -1664,7 +1748,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
 
     try:
         from deepagents import create_deep_agent
-        from deepagents.backends import LocalShellBackend
+        from deepagents.backends import FilesystemBackend
         from langchain.agents.middleware import TodoListMiddleware
         from langchain_core.callbacks import BaseCallbackHandler
         from langchain_core.messages import messages_to_dict
@@ -1704,23 +1788,11 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills):
     chat_model = _chat_model(settings)
     chat_model.callbacks = [*(chat_model.callbacks or ()), call_counter]
 
-    class WorkspaceBackend(LocalShellBackend):
-        """Make Deep Agents' virtual attempt paths valid inside local bash."""
-
-        # execute translates only the two host-owned virtual directory prefixes.
-        def execute(self, command, *, timeout=None):
-            """Run a command after mapping virtual paths relative to the workspace."""
-            command = command.replace("/attempts/", "attempts/")
-            command = command.replace("/profiles/", "profiles/")
-            return super().execute(command, timeout=timeout)
-
-    # WorkspaceBackend adds Deep Agents' execute tool while withholding host credentials.
-    backend = WorkspaceBackend(
+    # Local agent tools are rooted file operations; arbitrary commands stay in gpu_shell.
+    backend = FilesystemBackend(
         root_dir=workspace.directory,
-        env={
-            "PATH": os.environ.get("PATH", os.defpath),
-            "PYTHONDONTWRITEBYTECODE": "1",
-        },
+        virtual_mode=True,
+        max_file_size_mb=64,
     )
 
     middleware = []

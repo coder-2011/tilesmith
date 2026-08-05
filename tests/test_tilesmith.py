@@ -290,12 +290,13 @@ class TilesmithAgentTests(unittest.TestCase):
             warnings.catch_warnings(),
         ):
             warnings.simplefilter("error")
-            with self.assertRaises(UserWarning):
-                kernel(["first"])
-            result = kernel(["second"])
+            first = kernel(["first"])
+            second = kernel(["second"])
 
-        self.assertEqual(result, "baseline")
+        self.assertEqual(first, "baseline")
+        self.assertEqual(second, "baseline")
         self.assertEqual(install.call_count, 1)
+        self.assertEqual(baseline.call_count, 2)
         baseline.assert_called_with(["second"])
 
     # test_attempt_workspace_rotates_five_files checks source lineage and reference repair together.
@@ -323,6 +324,15 @@ class TilesmithAgentTests(unittest.TestCase):
             )
             self.assertEqual(bodies, [f"candidate-{i}\n" for i in range(1, 6)])
             self.assertTrue(all(path.read_text().startswith(tilesmith.REFERENCE_START) for path in attempts))
+
+            with tempfile.TemporaryDirectory() as external_directory:
+                sentinel = Path(external_directory) / "sentinel.py"
+                sentinel.write_text("outside\n", encoding="utf-8")
+                attempts[0].unlink()
+                attempts[0].symlink_to(sentinel)
+                with self.assertRaisesRegex(ValueError, "regular file"):
+                    workspace.normalize_all()
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside\n")
 
     # test_run_tracks_separate_evidence_from_shared_artifacts covers repeated identical compiles.
     def test_run_tracks_separate_evidence_from_shared_artifacts(self):
@@ -396,7 +406,17 @@ class TilesmithAgentTests(unittest.TestCase):
 
     # test_compute_sandbox_exit_orders_teardown protects the paid resource boundary.
     def test_compute_sandbox_exit_orders_teardown(self):
-        """Destroy paid resources before closing their event-loop owner."""
+        """Run inside an active loop and destroy resources before their loop owner."""
+
+        async def run_inside_loop():
+            runner = tilesmith._AsyncThreadRunner()
+            try:
+                return runner.run(asyncio.sleep(0, result="thread-loop"))
+            finally:
+                runner.close()
+
+        self.assertEqual(asyncio.run(run_inside_loop()), "thread-loop")
+
         events = []
         sandbox = object.__new__(tilesmith._ComputeSandbox)
         sandbox.sandbox = object()
@@ -546,9 +566,9 @@ class TilesmithAgentTests(unittest.TestCase):
                     content="",
                     tool_calls=[
                         {
-                            "name": "execute",
-                            "args": {"command": "cp /attempts/attempt_01.py execute-copy.py"},
-                            "id": "execute-1",
+                            "name": "read_file",
+                            "args": {"file_path": "/attempts/attempt_01.py"},
+                            "id": "read-1",
                             "type": "tool_call",
                         }
                     ],
@@ -628,16 +648,14 @@ class TilesmithAgentTests(unittest.TestCase):
             reports = sorted(profiles.glob("*.json"))
             first_trace = (profiles / "trace_00.json").read_text()
             second_trace = (profiles / "trace_01.json").read_text()
-            execute_copy_exists = (Path(directory) / "track" / "execute-copy.py").is_file()
 
         self.assertIn(optimized_2, result.source)
         self.assertEqual(result.benchmarks, 2)
         self.assertEqual(result.model_calls, 6)
         self.assertEqual(result.confirmed_score, 0.4)
         self.assertEqual(evaluator.shell_commands, [("nvidia-smi", 30)])
-        self.assertTrue(execute_copy_exists)
-        self.assertIn("execute-1", first_trace)
-        self.assertNotIn("execute-1", second_trace)
+        self.assertIn("read-1", first_trace)
+        self.assertNotIn("read-1", second_trace)
         self.assertIn("write-2", second_trace)
         self.assertEqual(len(attempts), 5)
         self.assertEqual(
@@ -652,14 +670,15 @@ class TilesmithAgentTests(unittest.TestCase):
         )
         self.assertTrue(
             {
-                "execute",
                 "gpu_shell",
+                "read_file",
                 "read_exact_source",
                 "web_search",
                 "write_file",
             }
             <= _ToolModel.seen_tools
         )
+        self.assertNotIn("execute", _ToolModel.seen_tools)
 
     # test_model_call_limit_counts_provider_calls protects the public budget invariant.
     def test_model_call_limit_counts_provider_calls(self):
