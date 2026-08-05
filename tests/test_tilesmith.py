@@ -172,7 +172,8 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIn("## Workspace contract", low_prompt)
         self.assertIn("only local file you may edit", low_prompt)
         self.assertIn("## Turn lifecycle", low_prompt)
-        self.assertIn("## GPU workspace", low_prompt)
+        self.assertIn("## GPU workspace (NVIDIA H100 (sm_90))", low_prompt)
+        self.assertIn("persistent NVIDIA H100 (sm_90) ComputeSDK sandbox", low_prompt)
         self.assertIn("candidate.py` is the only remote file you may edit", low_prompt)
         self.assertIn("Do not modify, delete, or rely on any of them", low_prompt)
         self.assertIn("kernel fusion or decomposition", medium_prompt)
@@ -181,6 +182,19 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(tilesmith._read_settings(None, "").agency, "medium")
         with self.assertRaisesRegex(ValueError, "agency must be 'low', 'medium'"):
             tilesmith._read_settings(None, "", agency="unbounded")
+
+    # test_local_prompt_omits_gpu_workspace keeps the default no-sandbox path free of remote instructions.
+    def test_local_prompt_omits_gpu_workspace(self):
+        """Omit GPU-shell instructions when no sandbox evaluator is available."""
+        settings = Mock(agency="low", loops=1, max_model_calls=None)
+        evaluator = Mock(execution="the local CUDA device", chip="NVIDIA L4", spec=[])
+        evaluator.shell_help = None
+
+        prompt = tilesmith._agent_instructions(settings, evaluator, ())
+
+        self.assertNotIn("## GPU workspace", prompt)
+        self.assertNotIn("`gpu_shell`", prompt)
+        self.assertNotIn("candidate.py` is the only remote file you may edit", prompt)
 
     # test_skill_snapshot_stabilizes_prompt protects cache identity from concurrent file edits.
     def test_skill_snapshot_stabilizes_prompt(self):
