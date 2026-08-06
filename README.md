@@ -141,5 +141,3 @@ finish a requested loop until the host:
 3. observes at least `TILESMITH_MIN_IMPROVEMENT`, which defaults to `0.02`;
 4. repeats correctness and timing in a fresh confirmation; and
 5. sees the confirmation clear the same speedup threshold.
-
-We also offer the option to test implementations in sandboxes to return speed, or used to loops.

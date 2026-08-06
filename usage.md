@@ -162,6 +162,7 @@ destroyed afterward.
 | `TILESMITH_CLIPROXYAPI_AUTH_DIR` | `~/.cli-proxy-api` | Codex-login directory |
 | `TILESMITH_MIN_IMPROVEMENT` | `0.02` | Required fractional speedup |
 | `TILESMITH_TIMEOUT` | `1200` | Optimization timeout in seconds |
+| `TILESMITH_MAX_OUTPUT_TOKENS` | `16384` | Maximum tokens in one agent-model response |
 | `TILESMITH_SANDBOX_TIMEOUT` | `3600` | ComputeSDK sandbox lifetime in seconds |
 | `TILESMITH_CACHE_DIR` | `~/.cache/tilesmith` | Cache and run evidence directory |
 | `TILESMITH_DEBUG` | unset | Set to `1` to retain complete per-turn agent traces |

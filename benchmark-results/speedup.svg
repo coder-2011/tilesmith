@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="130" viewBox="0 0 920 130">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:ui-sans-serif,system-ui,sans-serif;fill:#172033}.small{font-size:12px}.title{font-size:20px;font-weight:700}</style>
+<text x="40" y="38" class="title">Tilesmith speedup over TorchInductor</text>
+<text x="40" y="92" class="small">No Tilesmith candidate was produced; fallback timings are excluded.</text>
+</svg>

@@ -150,6 +150,7 @@ class _Settings:
     skills: tuple[str, ...]
     timeout: float
     debug: bool = False
+    max_output_tokens: int = 16_384
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,16 @@ class _CachedSource:
     path: Path
     source: bytes
     benchmark: Benchmark | None
+
+    def install(self, baseline_source, baseline, constants, benchmark_results):
+        """Load this verified source and publish its saved benchmark once."""
+        if self.source.decode("utf-8") == baseline_source:  # noqa: SIM108 - keep cache-hit loading explicit.
+            target = baseline
+        else:
+            target = _load_call_bytes(self.source, constants)
+        if self.benchmark is not None and benchmark_results is not None:
+            benchmark_results.append(self.benchmark)
+        return target
 
 
 class _LoopState(TypedDict):
@@ -260,6 +271,7 @@ def compile(
 def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium", agent_model=None):
     min_improvement = float(os.environ.get("TILESMITH_MIN_IMPROVEMENT", "0.02"))
     timeout = float(os.environ.get("TILESMITH_TIMEOUT", "1200"))
+    max_output_tokens = int(os.environ.get("TILESMITH_MAX_OUTPUT_TOKENS", "16384"))
     if isinstance(loops, bool) or not isinstance(loops, int) or loops < 1:
         raise ValueError("loops must be a positive integer")
     if max_model_calls is not None and (isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int) or max_model_calls < 1):
@@ -270,6 +282,8 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
         raise ValueError("TILESMITH_MIN_IMPROVEMENT must be in [0, 1)")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("TILESMITH_TIMEOUT must be a positive number of seconds")
+    if max_output_tokens < 1:
+        raise ValueError("TILESMITH_MAX_OUTPUT_TOKENS must be a positive integer")
 
     cache_default = Path.home() / ".cache" / "tilesmith"
     return _Settings(
@@ -284,6 +298,7 @@ def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium"
         skills=tuple(_default_skills()),
         timeout=timeout,
         debug=os.environ.get("TILESMITH_DEBUG") == "1",
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -574,14 +589,12 @@ class _LazyKernel:
                     cache_key,
                     cached.path,
                 )
-            # Load successfully before publishing the measurement to the caller.
-            if cached.source.decode("utf-8") == self.source:  # noqa: SIM108
-                target = self.baseline
-            else:
-                target = _load_call_bytes(cached.source, self.constants)
-            if cached.benchmark is not None and self.benchmark_results is not None:
-                self.benchmark_results.append(cached.benchmark)
-            return target
+            return cached.install(
+                self.source,
+                self.baseline,
+                self.constants,
+                self.benchmark_results,
+            )
 
         self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.settings.cache_dir / "locks" / f"{cache_key}.lock"
@@ -653,14 +666,12 @@ class _LazyKernel:
                         cache_key,
                         cached.path,
                     )
-        # Load successfully before publishing the measurement to the caller.
-        if cached.source.decode("utf-8") == self.source:  # noqa: SIM108
-            target = self.baseline
-        else:
-            target = _load_call_bytes(cached.source, self.constants)
-        if cached.benchmark is not None and self.benchmark_results is not None:
-            self.benchmark_results.append(cached.benchmark)
-        return target
+        return cached.install(
+            self.source,
+            self.baseline,
+            self.constants,
+            self.benchmark_results,
+        )
 
 
 # _canonical_source removes PyTorch's incrementing, non-executable AOT ID comment.
@@ -722,6 +733,7 @@ def _cache_key(source, settings, device, graph_key, skills):
         "inductor_graph": graph_key,
         "loops": settings.loops,
         "max_model_calls": settings.max_model_calls,
+        "max_output_tokens": settings.max_output_tokens,
         "min_improvement": settings.min_improvement,
         "model": settings.model,
         "python": platform.python_version(),
@@ -1917,6 +1929,7 @@ def _chat_model(settings, connection):
         base_url=base_url,
         include=["reasoning.encrypted_content"],
         max_retries=0,
+        max_tokens=settings.max_output_tokens,
         model=settings.model,
         store=False,
         timeout=settings.timeout,
