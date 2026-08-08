@@ -26,7 +26,7 @@ IMAGE = (
         f"rm -f /tmp/{CLIPROXY_ARCHIVE}",
         "rm -rf /tmp/tilesmith-cliproxyapi",
     )
-    .uv_pip_install("torch", "deepagents>=0.7.1,<0.8", "langchain-openai>=1.4.1,<2")
+    .uv_pip_install("torch", "deepagents>=0.7.1,<0.8", "langchain-openai>=1.4.1,<2", "pyyaml>=6,<7")
     .add_local_dir(ROOT / "src", "/root/src")
     .add_local_file(ROOT / "benchmark_suite.py", "/root/benchmark_suite.py")
     .add_local_file(SKILL_ROOT / "check-normal" / "SKILL.md", "/root/.codex/skills/check-normal/SKILL.md")
@@ -80,14 +80,15 @@ def _parse_loops(value):
     return loops
 
 
-# _require_cliproxy_auth prevents a GPU launch with an empty account volume.
-def _require_cliproxy_auth():
-    """Require at least one CLIProxyAPI account file at the mounted volume root."""
+# _require_cliproxy_configuration prevents a GPU launch without an OAuth account or API config.
+def _require_cliproxy_configuration():
+    """Require CLIProxyAPI OAuth files or a provider config at the volume root."""
     entries = CLIPROXY_AUTH_VOLUME.listdir("/", recursive=False)
     if any(entry.type.name == "FILE" for entry in entries):
         return
-    command = "modal volume put tilesmith-cliproxyapi-auth ~/.cli-proxy-api ."
-    raise RuntimeError(f"CLIProxyAPI auth volume is empty; seed it with: {command}")
+    oauth_command = "modal volume put tilesmith-cliproxyapi-auth ~/.cli-proxy-api ."
+    api_command = "modal volume put tilesmith-cliproxyapi-auth path/to/config.yaml config.yaml"
+    raise RuntimeError(f"CLIProxyAPI volume is empty; upload OAuth files with `{oauth_command}` or an API config with `{api_command}`")
 
 
 # _download_evidence copies only this sweep's persistent run directories to the result folder.
@@ -127,7 +128,7 @@ def main(
     """Run the requested sweep and persist its raw evidence and SVG charts locally."""
     if max_output_tokens < 1:
         raise ValueError("max_output_tokens must be a positive integer")
-    _require_cliproxy_auth()
+    _require_cliproxy_configuration()
     result = json.loads(run_suite.remote(agent_model, _parse_loops(loops), max_model_calls, max_output_tokens))
     downloaded = _download_evidence(result, output_dir)
     for value in result["results"]:

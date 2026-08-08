@@ -12,16 +12,24 @@ and Triton:
 python3 -m pip install tilesmith-ai
 ```
 
-To enable optimization, install CLIProxyAPI and add an account, such as Codex
-OAuth:
+To enable optimization, install CLIProxyAPI and configure an upstream. That can
+be an OAuth account, such as Codex:
 
 ```sh
 cliproxyapi -codex-login
 ```
 
-All model traffic goes through a private CLIProxyAPI process. Tilesmith detects
-its accounts at `~/.cli-proxy-api`; `TILESMITH_CLIPROXYAPI_EXECUTABLE` and
-`TILESMITH_CLIPROXYAPI_AUTH_DIR` override the executable and login directory.
+It can also be any API-backed provider in CLIProxyAPI's YAML, including its
+native API-key providers and OpenAI-compatible upstreams. All model traffic
+still goes through a private CLIProxyAPI process; Tilesmith never passes a
+provider key to its model client. It detects accounts at `~/.cli-proxy-api`, a
+`config.yaml` stored there, and Homebrew's CLIProxyAPI config.
+
+`TILESMITH_CLIPROXYAPI_EXECUTABLE`, `TILESMITH_CLIPROXYAPI_AUTH_DIR`, and
+`TILESMITH_CLIPROXYAPI_CONFIG` override those paths. Tilesmith loads a temporary
+config copy, preserving provider and routing settings while replacing only the
+loopback server address, TLS, client key, auth directory, and file logging. It
+does not modify the source config.
 
 ## Compile a model
 
@@ -163,6 +171,7 @@ destroyed afterward.
 | `TILESMITH_MODEL` | unset | Agent model when `agent_model` is omitted |
 | `TILESMITH_CLIPROXYAPI_EXECUTABLE` | `cliproxyapi` on `PATH` | Proxy executable |
 | `TILESMITH_CLIPROXYAPI_AUTH_DIR` | `~/.cli-proxy-api` | CLIProxyAPI account directory |
+| `TILESMITH_CLIPROXYAPI_CONFIG` | auto-detected | CLIProxyAPI provider and routing config |
 | `TILESMITH_MIN_IMPROVEMENT` | `0.02` | Required fractional speedup |
 | `TILESMITH_TIMEOUT` | `1200` | Optimization timeout in seconds |
 | `TILESMITH_MAX_OUTPUT_TOKENS` | `8192` | Maximum tokens in one agent-model response |

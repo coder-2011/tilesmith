@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
+import yaml
+
 from .measurement import (
     _restore_torch_process_state,
     _torch_process_state,
@@ -1815,14 +1817,27 @@ def _agent_instructions(settings, evaluator, skills):
     return "\n\n".join(sections)
 
 
-# _cliproxy_installation locates CLIProxyAPI and its account directory without reading credentials.
+# _cliproxy_installation locates CLIProxyAPI and either OAuth accounts or an API-provider config.
 def _cliproxy_installation():
-    """Return the configured CLIProxyAPI executable and auth directory, or None when unavailable."""
+    """Return the CLIProxyAPI executable, auth directory, and optional provider config."""
     executable = os.environ.get("TILESMITH_CLIPROXYAPI_EXECUTABLE") or shutil.which("cliproxyapi")
     auth_directory = Path(os.environ.get("TILESMITH_CLIPROXYAPI_AUTH_DIR", Path.home() / ".cli-proxy-api")).expanduser()
-    if executable is None or not auth_directory.is_dir():
+    configured_path = os.environ.get("TILESMITH_CLIPROXYAPI_CONFIG")
+    if configured_path:
+        config_path = Path(configured_path).expanduser()
+        if not config_path.is_file():
+            return None
+    else:
+        # Prefer a config mounted with OAuth files, then the two Homebrew defaults.
+        candidates = (
+            auth_directory / "config.yaml",
+            Path("/opt/homebrew/etc/cliproxyapi.conf"),
+            Path("/usr/local/etc/cliproxyapi.conf"),
+        )
+        config_path = next((path for path in candidates if path.is_file()), None)
+    if executable is None or (not auth_directory.is_dir() and config_path is None):
         return None
-    return executable, auth_directory
+    return executable, auth_directory, config_path
 
 
 # _loopback_port reserves a local port long enough to write the temporary proxy configuration.
@@ -1833,20 +1848,29 @@ def _loopback_port():
         return listener.getsockname()[1]
 
 
-# _cliproxy_config builds the private configuration discarded when one optimization run ends.
-def _cliproxy_config(port, auth_directory, api_key):
-    """Return a loopback-only CLIProxyAPI configuration with a temporary client key."""
-    return "\n".join(
-        (
-            "host: 127.0.0.1",
-            f"port: {port}",
-            f"auth-dir: {json.dumps(str(auth_directory))}",
-            "api-keys:",
-            f"  - {json.dumps(api_key)}",
-            "logging-to-file: false",
-            "",
-        )
+# _cliproxy_config preserves upstream providers while privatizing the temporary proxy server.
+def _cliproxy_config(port, auth_directory, api_key, source_path=None):
+    """Return a loopback config retaining OAuth, API-provider, and routing settings."""
+    config = {}
+    if source_path is not None:
+        source = source_path.read_text(encoding="utf-8")
+        loaded = yaml.safe_load(source)
+        if loaded is not None:
+            if not isinstance(loaded, dict):
+                raise RuntimeError(f"CLIProxyAPI config must contain a YAML mapping: {source_path}")
+            config = loaded
+    # These fields control only TileSmith's private client-to-proxy connection.
+    config.update(
+        {
+            "host": "127.0.0.1",
+            "port": port,
+            "tls": {"enable": False},
+            "auth-dir": str(auth_directory),
+            "api-keys": [api_key],
+            "logging-to-file": False,
+        }
     )
+    return yaml.safe_dump(config, sort_keys=False)
 
 
 # _stop_proxy terminates only the private child process created for this optimization run.
@@ -1865,17 +1889,21 @@ def _stop_proxy(process):
 # _model_connection keeps the sole CLIProxyAPI gateway alive for one complete agent run.
 @contextlib.contextmanager
 def _model_connection(model):
-    """Yield temporary loopback credentials backed only by configured CLIProxyAPI accounts."""
+    """Yield loopback credentials backed by configured CLIProxyAPI accounts or APIs."""
     installation = _cliproxy_installation()
     if installation is None:
-        raise RuntimeError("install CLIProxyAPI and configure its auth directory")
-    executable, auth_directory = installation
+        raise RuntimeError("install CLIProxyAPI and configure an OAuth account or API provider")
+    executable, auth_directory, source_path = installation
     api_key = secrets.token_urlsafe(32)
     port = _loopback_port()
     with tempfile.TemporaryDirectory(prefix="tilesmith-cliproxyapi-") as directory:
+        if not auth_directory.is_dir():
+            # API-only configurations still need an isolated writable auth directory.
+            auth_directory = Path(directory) / "auth"
+            auth_directory.mkdir()
         config_path = Path(directory) / "config.yaml"
         config_path.write_text(
-            _cliproxy_config(port, auth_directory, api_key),
+            _cliproxy_config(port, auth_directory, api_key, source_path),
             encoding="utf-8",
         )
         process = subprocess.Popen(

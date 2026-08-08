@@ -13,6 +13,7 @@ from types import ModuleType
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, Mock, patch
 
+import yaml
 from langchain_core.language_models.fake_chat_models import (
     FakeMessagesListChatModel,
 )
@@ -210,13 +211,61 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertNotIn("`gpu_shell`", prompt)
         self.assertNotIn("candidate.py` is the only remote file you may edit", prompt)
 
-    # test_agent_configuration_requires_cliproxy covers the sole model-gateway prerequisite.
+    # test_agent_configuration_requires_cliproxy covers OAuth and API-only gateway setup.
     def test_agent_configuration_requires_cliproxy(self):
-        """Enable the agent only when CLIProxyAPI itself is configured."""
+        """Enable the agent for CLIProxyAPI OAuth accounts or an API-provider config."""
         with patch.object(tilesmith, "_cliproxy_installation", return_value=None):
             self.assertFalse(tilesmith._agent_is_configured())
-        with patch.object(tilesmith, "_cliproxy_installation", return_value=("proxy", Path("auth"))):
+        with patch.object(tilesmith, "_cliproxy_installation", return_value=("proxy", Path("auth"), None)):
             self.assertTrue(tilesmith._agent_is_configured())
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.yaml"
+            config_path.write_text("codex-api-key: []\n", encoding="utf-8")
+            environment = {
+                "TILESMITH_CLIPROXYAPI_EXECUTABLE": "proxy",
+                "TILESMITH_CLIPROXYAPI_AUTH_DIR": str(Path(directory) / "missing-auth"),
+                "TILESMITH_CLIPROXYAPI_CONFIG": str(config_path),
+            }
+            with patch.dict("os.environ", environment, clear=True):
+                self.assertEqual(tilesmith._cliproxy_installation(), ("proxy", Path(directory) / "missing-auth", config_path))
+
+    # test_cliproxy_config_preserves_api_providers protects every upstream setting from the private overlay.
+    def test_cliproxy_config_preserves_api_providers(self):
+        """Retain provider API credentials while replacing only private proxy fields."""
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.yaml"
+            source = (
+                "host: 0.0.0.0\n"
+                "port: 8317\n"
+                "tls:\n"
+                "  enable: true\n"
+                "api-keys: [public-client-key]\n"
+                "logging-to-file: true\n"
+                "codex-api-key:\n"
+                "  - api-key: upstream-secret\n"
+                "    prefix: paid\n"
+                "routing:\n"
+                "  strategy: round-robin\n"
+            )
+            source_path.write_text(source, encoding="utf-8")
+
+            rendered = tilesmith._cliproxy_config(9123, Path("/private/auth"), "temporary-client-key", source_path)
+            config = yaml.safe_load(rendered)
+
+            self.assertEqual(config["codex-api-key"], [{"api-key": "upstream-secret", "prefix": "paid"}])
+            self.assertEqual(config["routing"], {"strategy": "round-robin"})
+            self.assertEqual(
+                {key: config[key] for key in ("host", "port", "tls", "auth-dir", "api-keys", "logging-to-file")},
+                {
+                    "host": "127.0.0.1",
+                    "port": 9123,
+                    "tls": {"enable": False},
+                    "auth-dir": "/private/auth",
+                    "api-keys": ["temporary-client-key"],
+                    "logging-to-file": False,
+                },
+            )
+            self.assertEqual(source_path.read_text(encoding="utf-8"), source)
 
     # test_skill_snapshot_stabilizes_prompt protects cache identity from concurrent file edits.
     def test_skill_snapshot_stabilizes_prompt(self):

@@ -37,10 +37,13 @@ python3 -m pip install tilesmith-ai
 cliproxyapi -codex-login
 ```
 
-All model traffic goes through a private CLIProxyAPI process. Tilesmith detects
-its accounts at `~/.cli-proxy-api`; set
-`TILESMITH_CLIPROXYAPI_EXECUTABLE` or `TILESMITH_CLIPROXYAPI_AUTH_DIR` to
-override the executable or login directory.
+All model traffic goes through a private CLIProxyAPI process. Its upstreams may
+be OAuth accounts or API providers from the CLIProxyAPI YAML. Tilesmith detects
+accounts at `~/.cli-proxy-api` and Homebrew's CLIProxyAPI config; set
+`TILESMITH_CLIPROXYAPI_EXECUTABLE`, `TILESMITH_CLIPROXYAPI_AUTH_DIR`, or
+`TILESMITH_CLIPROXYAPI_CONFIG` to override those paths. Tilesmith copies the
+config for each run, preserving provider and routing settings while replacing
+only its private loopback server settings.
 
 ## Compile from PyTorch
 

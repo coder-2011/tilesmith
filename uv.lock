@@ -1293,6 +1293,7 @@ source = { editable = "." }
 dependencies = [
     { name = "deepagents" },
     { name = "langchain-openai" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1304,6 +1305,7 @@ dev = [
 requires-dist = [
     { name = "deepagents", specifier = ">=0.7.1,<0.8" },
     { name = "langchain-openai", specifier = ">=1.4.1,<2" },
+    { name = "pyyaml", specifier = ">=6,<7" },
 ]
 
 [package.metadata.requires-dev]
