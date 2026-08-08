@@ -330,11 +330,10 @@ def _resolve_agent_model(agent_model):
     return agent_model.strip()
 
 
-# _agent_is_configured checks for a usable API key or externally owned Codex login without starting either route.
+# _agent_is_configured checks for an externally owned CLIProxyAPI installation without starting it.
 def _agent_is_configured():
     """Return whether a supported model connection has enough local configuration to start."""
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
-    return bool(api_key) or _codex_login_installation() is not None
+    return _cliproxy_installation() is not None
 
 
 # _read_compute_config validates a direct provider before provisioning a billable sandbox.
@@ -1816,8 +1815,8 @@ def _agent_instructions(settings, evaluator, skills):
     return "\n\n".join(sections)
 
 
-# _codex_login_installation locates the external CLIProxyAPI login without reading its credentials.
-def _codex_login_installation():
+# _cliproxy_installation locates CLIProxyAPI and its account directory without reading credentials.
+def _cliproxy_installation():
     """Return the configured CLIProxyAPI executable and auth directory, or None when unavailable."""
     executable = os.environ.get("TILESMITH_CLIPROXYAPI_EXECUTABLE") or shutil.which("cliproxyapi")
     auth_directory = Path(os.environ.get("TILESMITH_CLIPROXYAPI_AUTH_DIR", Path.home() / ".cli-proxy-api")).expanduser()
@@ -1834,8 +1833,8 @@ def _loopback_port():
         return listener.getsockname()[1]
 
 
-# _codex_proxy_config builds the private configuration discarded when one optimization run ends.
-def _codex_proxy_config(port, auth_directory, api_key):
+# _cliproxy_config builds the private configuration discarded when one optimization run ends.
+def _cliproxy_config(port, auth_directory, api_key):
     """Return a loopback-only CLIProxyAPI configuration with a temporary client key."""
     return "\n".join(
         (
@@ -1863,17 +1862,20 @@ def _stop_proxy(process):
         process.wait()
 
 
-# _codex_model_connection keeps one private login proxy alive while its route is being considered or used.
+# _model_connection keeps the sole CLIProxyAPI gateway alive for one complete agent run.
 @contextlib.contextmanager
-def _codex_model_connection(installation):
-    """Yield temporary loopback credentials backed by one existing Codex login."""
+def _model_connection(model):
+    """Yield temporary loopback credentials backed only by configured CLIProxyAPI accounts."""
+    installation = _cliproxy_installation()
+    if installation is None:
+        raise RuntimeError("install CLIProxyAPI and configure its auth directory")
     executable, auth_directory = installation
     api_key = secrets.token_urlsafe(32)
     port = _loopback_port()
     with tempfile.TemporaryDirectory(prefix="tilesmith-cliproxyapi-") as directory:
         config_path = Path(directory) / "config.yaml"
         config_path.write_text(
-            _codex_proxy_config(port, auth_directory, api_key),
+            _cliproxy_config(port, auth_directory, api_key),
             encoding="utf-8",
         )
         process = subprocess.Popen(
@@ -1882,40 +1884,11 @@ def _codex_model_connection(installation):
             stderr=subprocess.DEVNULL,
         )
         try:
-            yield api_key, f"http://127.0.0.1:{port}/v1"
+            base_url = f"http://127.0.0.1:{port}/v1"
+            _wait_for_model(model, api_key, base_url)
+            yield api_key, base_url
         finally:
             _stop_proxy(process)
-
-
-# _model_connection selects the first configured route that exposes the requested model.
-@contextlib.contextmanager
-def _model_connection(model):
-    """Probe configured routes in priority order and yield the first usable connection."""
-    routes = []
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if openai_api_key:
-        connection = openai_api_key, os.environ.get("OPENAI_BASE_URL")
-        routes.append(("OPENAI_API_KEY", contextlib.nullcontext(connection)))
-    installation = _codex_login_installation()
-    if installation is not None:
-        routes.append(("Codex login", _codex_model_connection(installation)))
-    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
-    if openrouter_api_key:
-        connection = openrouter_api_key, "https://openrouter.ai/api/v1"
-        routes.append(("OPENROUTER_API_KEY", contextlib.nullcontext(connection)))
-    if not routes:
-        raise RuntimeError("configure OPENAI_API_KEY, OPENROUTER_API_KEY, or CLIProxyAPI Codex login")
-    failures = []
-    for name, route in routes:
-        with route as connection:
-            try:
-                _wait_for_model(model, *connection)
-            except Exception as error:
-                failures.append(f"{name}: {_summarize(error)}")
-                continue
-            yield connection
-            return
-    raise RuntimeError(f"no configured model route can serve {model!r}: {'; '.join(failures)}")
 
 
 # _wait_for_model prevents startup races from consuming a GPU before its model is ready.

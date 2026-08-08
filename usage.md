@@ -12,22 +12,16 @@ and Triton:
 python3 -m pip install tilesmith-ai
 ```
 
-To enable optimization, configure one model route:
-
-```sh
-export OPENAI_API_KEY=...
-```
-
-Tilesmith tries an explicit OpenAI-compatible endpoint, Codex login, and then
-OpenRouter, selecting the first route that exposes the requested model.
-`OPENROUTER_API_KEY` is only an optional fallback. Install and log in to
-`cliproxyapi` with Codex OAuth. Tilesmith detects its existing login at
-`~/.cli-proxy-api`; `TILESMITH_CLIPROXYAPI_EXECUTABLE` and
-`TILESMITH_CLIPROXYAPI_AUTH_DIR` override the executable and login directory.
+To enable optimization, install CLIProxyAPI and add an account, such as Codex
+OAuth:
 
 ```sh
 cliproxyapi -codex-login
 ```
+
+All model traffic goes through a private CLIProxyAPI process. Tilesmith detects
+its accounts at `~/.cli-proxy-api`; `TILESMITH_CLIPROXYAPI_EXECUTABLE` and
+`TILESMITH_CLIPROXYAPI_AUTH_DIR` override the executable and login directory.
 
 ## Compile a model
 
@@ -53,7 +47,7 @@ to check correctness and measure candidates.
 
 `agent_model` selects the model that optimizes generated wrappers. It takes
 precedence over `TILESMITH_MODEL`, which can supply the same setting globally.
-Choose a model listed by your API provider or Codex login.
+Choose a model listed by CLIProxyAPI.
 
 Optimization is lazy. `tilesmith.compile()` returns a normal
 `torch.compile` callable, and PyTorch compiles it when you first invoke it.
@@ -167,8 +161,8 @@ destroyed afterward.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `TILESMITH_MODEL` | unset | Agent model when `agent_model` is omitted |
-| `TILESMITH_CLIPROXYAPI_EXECUTABLE` | `cliproxyapi` on `PATH` | Codex-login proxy executable |
-| `TILESMITH_CLIPROXYAPI_AUTH_DIR` | `~/.cli-proxy-api` | Codex-login directory |
+| `TILESMITH_CLIPROXYAPI_EXECUTABLE` | `cliproxyapi` on `PATH` | Proxy executable |
+| `TILESMITH_CLIPROXYAPI_AUTH_DIR` | `~/.cli-proxy-api` | CLIProxyAPI account directory |
 | `TILESMITH_MIN_IMPROVEMENT` | `0.02` | Required fractional speedup |
 | `TILESMITH_TIMEOUT` | `1200` | Optimization timeout in seconds |
 | `TILESMITH_MAX_OUTPUT_TOKENS` | `8192` | Maximum tokens in one agent-model response |
@@ -188,8 +182,8 @@ Set `TILESMITH_DEBUG=1` to save complete per-turn agent traces as
 Traces can include generated source and tool arguments, so treat the cache
 directory as private. Cache hits do not create traces because no agent runs.
 
-When `example_inputs`, `agent_model`/`TILESMITH_MODEL`, or both the API-key and
-Codex-login routes are unavailable, `tilesmith.compile(...)` returns ordinary
+When `example_inputs`, `agent_model`/`TILESMITH_MODEL`, or CLIProxyAPI is
+unavailable, `tilesmith.compile(...)` returns ordinary
 `torch.compile(...)`. In that fallback, Tilesmith does not require CUDA inputs,
 run an agent, create cache files, or expose benchmark records.
 

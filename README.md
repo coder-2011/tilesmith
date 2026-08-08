@@ -34,19 +34,11 @@ Triton, then install Tilesmith and its agent runtime:
 
 ```sh
 python3 -m pip install tilesmith-ai
-export OPENAI_API_KEY=...
-```
-
-Tilesmith tries an explicit OpenAI-compatible endpoint, Codex login, and then
-OpenRouter, selecting the first route that exposes the requested model.
-`OPENROUTER_API_KEY` is therefore only an optional fallback. Install and log in
-to `cliproxyapi` to make Codex OAuth available:
-
-```sh
 cliproxyapi -codex-login
 ```
 
-Tilesmith detects the login at `~/.cli-proxy-api`; set
+All model traffic goes through a private CLIProxyAPI process. Tilesmith detects
+its accounts at `~/.cli-proxy-api`; set
 `TILESMITH_CLIPROXYAPI_EXECUTABLE` or `TILESMITH_CLIPROXYAPI_AUTH_DIR` to
 override the executable or login directory.
 
@@ -64,13 +56,13 @@ optimized_model = tilesmith.compile(
 ```
 
 `example_inputs` must be a tuple with at least one CUDA tensor. `agent_model`
-selects the optimizer model and overrides `TILESMITH_MODEL`; choose one offered
-by your API provider or Codex login. Compilation is lazy: PyTorch finishes
+selects the optimizer model and overrides `TILESMITH_MODEL`; choose one listed
+by CLIProxyAPI. Compilation is lazy: PyTorch finishes
 compiling first, and the first real invocation supplies the concrete tensors
 used for Tilesmith's correctness and timing checks.
 
-When `example_inputs`, `agent_model`/`TILESMITH_MODEL`, or both the API-key and
-Codex-login routes are unavailable, `tilesmith.compile(...)` returns ordinary
+When `example_inputs`, `agent_model`/`TILESMITH_MODEL`, or CLIProxyAPI is
+unavailable, `tilesmith.compile(...)` returns ordinary
 `torch.compile(...)`. `tilesmith.benchmarks(...)` then returns an empty tuple.
 
 `agency` controls how broadly the agent may alter generated code. `"low"`

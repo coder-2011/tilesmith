@@ -11,8 +11,21 @@ from benchmark_suite import write_artifacts
 ROOT = Path(__file__).resolve().parent
 SKILL_ROOT = Path.home() / ".codex" / "skills"
 CUDA_SKILL_ROOT = SKILL_ROOT / "high-performance-cuda"
+CLIPROXY_VERSION = "7.2.120"
+CLIPROXY_ARCHIVE = f"CLIProxyAPI_{CLIPROXY_VERSION}_linux_amd64.tar.gz"
+CLIPROXY_SHA256 = "8933332737338be5d5cedae4b96254b9afc8dfe0f13c4322738c65fd7931ce0a"
 IMAGE = (
     modal.Image.debian_slim(python_version="3.12")
+    .apt_install("ca-certificates", "curl")
+    .run_commands(
+        f"curl -fsSL https://github.com/router-for-me/CLIProxyAPI/releases/download/v{CLIPROXY_VERSION}/{CLIPROXY_ARCHIVE} -o /tmp/{CLIPROXY_ARCHIVE}",
+        f"echo '{CLIPROXY_SHA256}  /tmp/{CLIPROXY_ARCHIVE}' | sha256sum -c -",
+        "mkdir -p /tmp/tilesmith-cliproxyapi",
+        f"tar -xzf /tmp/{CLIPROXY_ARCHIVE} -C /tmp/tilesmith-cliproxyapi",
+        "install -m 0755 /tmp/tilesmith-cliproxyapi/cli-proxy-api /usr/local/bin/cliproxyapi",
+        f"rm -f /tmp/{CLIPROXY_ARCHIVE}",
+        "rm -rf /tmp/tilesmith-cliproxyapi",
+    )
     .uv_pip_install("torch", "deepagents>=0.7.1,<0.8", "langchain-openai>=1.4.1,<2")
     .add_local_dir(ROOT / "src", "/root/src")
     .add_local_file(ROOT / "benchmark_suite.py", "/root/benchmark_suite.py")
@@ -26,8 +39,8 @@ IMAGE = (
     .add_local_file(CUDA_SKILL_ROOT / "references/triton-and-codegen.md", "/root/.codex/skills/high-performance-cuda/references/triton-and-codegen.md")
 )
 APP = modal.App("tilesmith-workload-benchmarks")
-SECRET = modal.Secret.from_local_environ(["OPENROUTER_API_KEY"])
 EVIDENCE_VOLUME = modal.Volume.from_name("tilesmith-benchmark-evidence", create_if_missing=True)
+CLIPROXY_AUTH_VOLUME = modal.Volume.from_name("tilesmith-cliproxyapi-auth", create_if_missing=True)
 
 
 # run_suite places every workload and loop count on one shared L4 software stack.
@@ -36,8 +49,10 @@ EVIDENCE_VOLUME = modal.Volume.from_name("tilesmith-benchmark-evidence", create_
     gpu="L4",
     timeout=14_400,
     env={"PYTHONPATH": "/root/src", "TILESMITH_DEBUG": "1"},
-    secrets=[SECRET],
-    volumes={"/root/.cache/tilesmith": EVIDENCE_VOLUME},
+    volumes={
+        "/root/.cache/tilesmith": EVIDENCE_VOLUME,
+        "/root/.cli-proxy-api": CLIPROXY_AUTH_VOLUME,
+    },
 )
 def run_suite(agent_model, loops, max_model_calls, max_output_tokens):
     """Execute the CUDA suite and return its JSON-serializable evidence."""
@@ -49,6 +64,7 @@ def run_suite(agent_model, loops, max_model_calls, max_output_tokens):
         result = run_cuda_suite(agent_model, loops=tuple(loops), max_model_calls=max_model_calls)
     finally:
         EVIDENCE_VOLUME.commit()
+        CLIPROXY_AUTH_VOLUME.commit()
     return json.dumps(result, sort_keys=True)
 
 
@@ -62,6 +78,16 @@ def _parse_loops(value):
     if not loops or any(loop < 1 for loop in loops):
         raise ValueError("loops must be comma-separated positive integers")
     return loops
+
+
+# _require_cliproxy_auth prevents a GPU launch with an empty account volume.
+def _require_cliproxy_auth():
+    """Require at least one CLIProxyAPI account file at the mounted volume root."""
+    entries = CLIPROXY_AUTH_VOLUME.listdir("/", recursive=False)
+    if any(entry.type.name == "FILE" for entry in entries):
+        return
+    command = "modal volume put tilesmith-cliproxyapi-auth ~/.cli-proxy-api ."
+    raise RuntimeError(f"CLIProxyAPI auth volume is empty; seed it with: {command}")
 
 
 # _download_evidence copies only this sweep's persistent run directories to the result folder.
@@ -101,6 +127,7 @@ def main(
     """Run the requested sweep and persist its raw evidence and SVG charts locally."""
     if max_output_tokens < 1:
         raise ValueError("max_output_tokens must be a positive integer")
+    _require_cliproxy_auth()
     result = json.loads(run_suite.remote(agent_model, _parse_loops(loops), max_model_calls, max_output_tokens))
     downloaded = _download_evidence(result, output_dir)
     for value in result["results"]:
