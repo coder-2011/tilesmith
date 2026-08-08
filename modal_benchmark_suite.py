@@ -1,6 +1,7 @@
 """Run the Tilesmith workload suite on one Modal L4 GPU and save local charts."""
 
 import json
+import os
 from pathlib import Path
 
 import modal
@@ -26,6 +27,7 @@ IMAGE = (
 )
 APP = modal.App("tilesmith-workload-benchmarks")
 SECRET = modal.Secret.from_local_environ(["OPENROUTER_API_KEY"])
+EVIDENCE_VOLUME = modal.Volume.from_name("tilesmith-benchmark-evidence", create_if_missing=True)
 
 
 # run_suite places every workload and loop count on one shared L4 software stack.
@@ -33,14 +35,21 @@ SECRET = modal.Secret.from_local_environ(["OPENROUTER_API_KEY"])
     image=IMAGE,
     gpu="L4",
     timeout=14_400,
-    env={"PYTHONPATH": "/root/src"},
+    env={"PYTHONPATH": "/root/src", "TILESMITH_DEBUG": "1"},
     secrets=[SECRET],
+    volumes={"/root/.cache/tilesmith": EVIDENCE_VOLUME},
 )
-def run_suite(agent_model, loops, max_model_calls):
+def run_suite(agent_model, loops, max_model_calls, max_output_tokens):
     """Execute the CUDA suite and return its JSON-serializable evidence."""
     from benchmark_suite import run_suite as run_cuda_suite
 
-    return json.dumps(run_cuda_suite(agent_model, loops=tuple(loops), max_model_calls=max_model_calls), sort_keys=True)
+    os.environ["TILESMITH_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
+    # Commit even after a fatal suite error so the last partial agent trace survives container teardown.
+    try:
+        result = run_cuda_suite(agent_model, loops=tuple(loops), max_model_calls=max_model_calls)
+    finally:
+        EVIDENCE_VOLUME.commit()
+    return json.dumps(result, sort_keys=True)
 
 
 # _parse_loops validates the local CLI's compact comma-separated loop list.
@@ -55,15 +64,47 @@ def _parse_loops(value):
     return loops
 
 
+# _download_evidence copies only this sweep's persistent run directories to the result folder.
+def _download_evidence(result, output_dir):
+    """Download attempts, reports, and traces for every remote run that created evidence."""
+    destination = Path(output_dir) / "runs"
+    downloaded = set()
+    run_ids = {value.get("tilesmith_run_id") for value in result["results"]}
+    for run_id in sorted(value for value in run_ids if value):
+        remote_root = f"runs/{run_id}"
+        try:
+            entries = EVIDENCE_VOLUME.listdir(remote_root, recursive=True)
+        except modal.exception.NotFoundError:
+            continue
+        for entry in entries:
+            if entry.type.name != "FILE":
+                continue
+            relative = Path(entry.path.lstrip("/")).relative_to(remote_root)
+            local_path = destination / run_id / relative
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            with local_path.open("wb") as output:
+                for chunk in EVIDENCE_VOLUME.read_file(entry.path):
+                    output.write(chunk)
+        downloaded.add(run_id)
+    return downloaded
+
+
 # main submits the remote suite and creates charts on the caller's filesystem.
 @APP.local_entrypoint()
 def main(
     agent_model: str = "openai/gpt-5.5",
     loops: str = "1,2,3",
     max_model_calls: int = 24,
+    max_output_tokens: int = 8_192,
     output_dir: str = "benchmark-results",
 ):
     """Run the requested sweep and persist its raw evidence and SVG charts locally."""
-    result = json.loads(run_suite.remote(agent_model, _parse_loops(loops), max_model_calls))
+    if max_output_tokens < 1:
+        raise ValueError("max_output_tokens must be a positive integer")
+    result = json.loads(run_suite.remote(agent_model, _parse_loops(loops), max_model_calls, max_output_tokens))
+    downloaded = _download_evidence(result, output_dir)
+    for value in result["results"]:
+        if value.get("tilesmith_run_id") in downloaded:
+            value["tilesmith_evidence_path"] = f"runs/{value['tilesmith_run_id']}"
     write_artifacts(result, output_dir)
     print(f"wrote {Path(output_dir).resolve()}", flush=True)

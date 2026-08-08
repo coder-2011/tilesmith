@@ -161,6 +161,7 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIs(result, compiled)
         self.assertIsInstance(compiled.current_callable, tilesmith._LazyKernel)
         self.assertIs(compiled.current_callable.benchmark_results, backend.benchmark_results)
+        self.assertIs(compiled.current_callable.diagnostic_results, backend.diagnostic_results)
         self.assertIn("extern_kernels.mm", compiled.current_callable.source)
         self.assertIn(tilesmith.REFERENCE_START, compiled.current_callable.source)
 
@@ -188,6 +189,7 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIn("Preserve the high-level algorithm", medium_prompt)
         self.assertIn("fuse, split, add, or remove kernels", high_prompt)
         self.assertEqual(tilesmith._read_settings(None, "").agency, "medium")
+        self.assertEqual(tilesmith._read_settings(None, "").max_output_tokens, 8_192)
         with patch.dict("os.environ", {"TILESMITH_DEBUG": "1"}):
             self.assertTrue(tilesmith._read_settings(None, "").debug)
         with patch.dict("os.environ", {"TILESMITH_DEBUG": "0"}):
@@ -264,6 +266,7 @@ class TilesmithAgentTests(unittest.TestCase):
     def test_optimizer_failure_falls_back(self):
         """Latch ordinary Inductor after an optimization failure."""
         calls = []
+        diagnostics = []
         owner = Mock()
 
         # baseline records the boxed input that ordinary Inductor receives.
@@ -278,6 +281,7 @@ class TilesmithAgentTests(unittest.TestCase):
             None,
             "graph-key",
             owner=owner,
+            diagnostic_results=diagnostics,
         )
         owner.current_callable = kernel
         with (
@@ -290,6 +294,7 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertEqual(calls, [["input"]])
         self.assertIs(kernel.installed, baseline)
         self.assertIs(owner.current_callable, baseline)
+        self.assertEqual(diagnostics, [tilesmith.Diagnostic("failed", "RuntimeError: offline")])
 
     # test_warning_promotion_keeps_fallback_latched covers a failure after state publication.
     def test_warning_promotion_keeps_fallback_latched(self):
@@ -371,13 +376,14 @@ class TilesmithAgentTests(unittest.TestCase):
             second_record = json.loads((second / "cache.json").read_text())
             cached_source = artifact.source.decode()
             cached_benchmark = tilesmith._read_cache(cache_dir, cache_key).benchmark
-            compiled = Mock(_tilesmith_benchmarks=[cached_benchmark])
+            compiled = Mock(_tilesmith_benchmarks=[cached_benchmark], _tilesmith_diagnostics=[])
 
         self.assertNotEqual(first, second)
         self.assertEqual(first_record["status"], "cache_hit")
         self.assertEqual(second_record["artifact"], "artifacts/same-graph.py")
         self.assertEqual(cached_source, source)
         self.assertEqual(tilesmith.benchmarks(compiled), (cached_benchmark,))
+        self.assertEqual(tilesmith.diagnostics(compiled), ())
         self.assertTrue(cached_benchmark.cached)
         self.assertEqual(cached_benchmark.torch_inductor_ms, 1.0)
         self.assertEqual(cached_benchmark.tilesmith_ms, 0.5)
@@ -741,6 +747,43 @@ class TilesmithAgentTests(unittest.TestCase):
 
         self.assertIn('"model_call_limit_reached": true', final_trace)
         self.assertIn('"model_calls": 1', final_trace)
+
+    # test_provider_failure_persists_partial_trace keeps transport errors inspectable after fallback.
+    def test_provider_failure_persists_partial_trace(self):
+        """Write the current trace before propagating an agent-model transport failure."""
+        settings = tilesmith._Settings(
+            agency="high",
+            cache_dir=Path("/tmp"),
+            compute=None,
+            loops=1,
+            max_model_calls=6,
+            min_improvement=0.01,
+            model="test",
+            run_id="test-run",
+            skills=(),
+            timeout=10.0,
+            debug=True,
+        )
+        source = tilesmith._with_reference(
+            "def forward(self, x):\n    return x",
+            "def call(args):\n    return args\n",
+        )
+        model = Mock(callbacks=[])
+        agent = Mock()
+        agent.stream.side_effect = RuntimeError("provider offline")
+
+        with tempfile.TemporaryDirectory() as directory:
+            track = Path(directory) / "track"
+            with (
+                patch("deepagents.create_deep_agent", return_value=agent),
+                patch.object(tilesmith, "_chat_model", return_value=model),
+                self.assertRaisesRegex(RuntimeError, "provider offline"),
+            ):
+                tilesmith._run_agent(source, settings, _Evaluator(), track, ())
+            trace = json.loads((track / "profiles" / "trace_00.json").read_text())
+
+        self.assertEqual(trace["error"], "RuntimeError: provider offline")
+        self.assertEqual(trace["messages"], [])
 
 
 if __name__ == "__main__":

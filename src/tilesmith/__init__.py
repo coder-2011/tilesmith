@@ -120,6 +120,14 @@ class Benchmark:
 
 
 @dataclass(frozen=True)
+class Diagnostic:
+    """Explain why one graph did not produce an accepted Tilesmith artifact."""
+
+    kind: str
+    message: str
+
+
+@dataclass(frozen=True)
 class _ComputeConfig:
     """Hold one resolved ComputeSDK placement request."""
 
@@ -150,7 +158,7 @@ class _Settings:
     skills: tuple[str, ...]
     timeout: float
     debug: bool = False
-    max_output_tokens: int = 16_384
+    max_output_tokens: int = 8_192
 
 
 @dataclass(frozen=True)
@@ -197,6 +205,12 @@ class _LoopState(TypedDict):
 def benchmarks(compiled):
     """Return immutable per-graph results after the compiled callable has run."""
     return tuple(getattr(compiled, "_tilesmith_benchmarks", ()))
+
+
+# diagnostics snapshots graph rejection and agent failure reasons attached by compile.
+def diagnostics(compiled):
+    """Return immutable diagnostics for graphs that stayed on ordinary Inductor."""
+    return tuple(getattr(compiled, "_tilesmith_diagnostics", ()))
 
 
 # compile returns a normal torch.compile callable while routing Inductor graphs through Tilesmith.
@@ -264,6 +278,8 @@ def compile(
         options=options,
     )
     compiled._tilesmith_benchmarks = backend.benchmark_results
+    compiled._tilesmith_diagnostics = backend.diagnostic_results
+    compiled._tilesmith_run_id = settings.run_id
     return compiled
 
 
@@ -271,7 +287,7 @@ def compile(
 def _read_settings(sandbox, chip, loops=1, max_model_calls=None, agency="medium", agent_model=None):
     min_improvement = float(os.environ.get("TILESMITH_MIN_IMPROVEMENT", "0.02"))
     timeout = float(os.environ.get("TILESMITH_TIMEOUT", "1200"))
-    max_output_tokens = int(os.environ.get("TILESMITH_MAX_OUTPUT_TOKENS", "16384"))
+    max_output_tokens = int(os.environ.get("TILESMITH_MAX_OUTPUT_TOKENS", "8192"))
     if isinstance(loops, bool) or not isinstance(loops, int) or loops < 1:
         raise ValueError("loops must be a positive integer")
     if max_model_calls is not None and (isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int) or max_model_calls < 1):
@@ -387,6 +403,14 @@ class _Backend:
         self.settings = settings
         self.dynamic = dynamic
         self.benchmark_results = []
+        self.diagnostic_results = []
+
+    # _reject records why one compiled graph remains on its original Inductor callable.
+    def _reject(self, compiled, reason):
+        """Record one ineligible graph and emit its existing fallback warning."""
+        self.diagnostic_results.append(Diagnostic("ineligible", reason))
+        warnings.warn(reason, stacklevel=2)
+        return compiled
 
     # __call__ gives Dynamo's graph to Inductor while keeping the interception path cache-visible.
     def __call__(self, graph_module, example_inputs, mode=None, options=None):
@@ -419,11 +443,8 @@ class _Backend:
             return compiled
         # The complete raw CUDA wrapper is editable whether it embeds kernels or calls libraries.
         if set(compiled.device_types) != {"cuda"} or len(compiled.device_idxs) != 1:
-            warnings.warn(
-                "Tilesmith left a mixed-device or multi-GPU graph on ordinary Inductor",
-                stacklevel=2,
-            )
-            return compiled
+            reason = "Tilesmith left a mixed-device or multi-GPU graph on ordinary Inductor"
+            return self._reject(compiled, reason)
 
         # One runtime shape cannot validate a replacement across a symbolic range.
         dynamic_inputs = False
@@ -436,35 +457,23 @@ class _Backend:
                 if dynamic_inputs:
                     break
         if dynamic_inputs:
-            warnings.warn(
-                "Tilesmith left a dynamic-shape graph on ordinary Inductor",
-                stacklevel=2,
-            )
-            return compiled
+            reason = "Tilesmith left a dynamic-shape graph on ordinary Inductor"
+            return self._reject(compiled, reason)
         if compiled.mutated_input_idxs:
-            warnings.warn(
-                "Tilesmith left an input-mutating graph on ordinary Inductor",
-                stacklevel=2,
-            )
-            return compiled
+            reason = "Tilesmith left an input-mutating graph on ordinary Inductor"
+            return self._reject(compiled, reason)
         if not _is_raw_generated_call(compiled):
-            warnings.warn("Tilesmith left a wrapped Inductor graph unchanged", stacklevel=2)
-            return compiled
+            reason = "Tilesmith left a wrapped Inductor graph unchanged"
+            return self._reject(compiled, reason)
         if self.settings.compute is not None and set(compiled.device_idxs) != {0}:
-            warnings.warn(
-                "Tilesmith left a non-cuda:0 graph unchanged because a one-GPU sandbox exposes its device as cuda:0",
-                stacklevel=2,
-            )
-            return compiled
+            reason = "Tilesmith left a non-cuda:0 graph unchanged because a one-GPU sandbox exposes its device as cuda:0"
+            return self._reject(compiled, reason)
 
         constants = CompiledFxGraphConstantsWithGm(graph_module).unwrap(compiled)
         graph_key = getattr(compiled, "_fx_graph_cache_key", None)
         if constants and graph_key is None:
-            warnings.warn(
-                "Tilesmith left a constant-bearing graph without a stable Inductor cache identity unchanged",
-                stacklevel=2,
-            )
-            return compiled
+            reason = "Tilesmith left a constant-bearing graph without a stable Inductor cache identity unchanged"
+            return self._reject(compiled, reason)
         source = _with_reference(graph_module.code, compiled.source_code)
         compiled.current_callable = _LazyKernel(
             compiled.current_callable,
@@ -474,6 +483,7 @@ class _Backend:
             graph_key or compiled.cache_key,
             owner=compiled,
             benchmark_results=self.benchmark_results,
+            diagnostic_results=self.diagnostic_results,
         )
         return compiled
 
@@ -492,7 +502,17 @@ def _is_raw_generated_call(compiled):
 
 class _LazyKernel:
     # __init__ defers optimization until real runtime tensors are available for validation and timing.
-    def __init__(self, baseline, source, constants, settings, graph_key, owner=None, benchmark_results=None):
+    def __init__(
+        self,
+        baseline,
+        source,
+        constants,
+        settings,
+        graph_key,
+        owner=None,
+        benchmark_results=None,
+        diagnostic_results=None,
+    ):
         self.baseline = baseline
         self.source = _canonical_source(source)
         self.constants = constants
@@ -503,6 +523,7 @@ class _LazyKernel:
         self.installing_thread = None
         self.owner = owner
         self.benchmark_results = benchmark_results
+        self.diagnostic_results = diagnostic_results
         self.pid = os.getpid()
 
     # __call__ installs exactly one validated artifact, then preserves Inductor's boxed calling convention.
@@ -535,6 +556,9 @@ class _LazyKernel:
             except Exception as caught:
                 error = caught
                 target = self.baseline
+                if self.diagnostic_results is not None:
+                    message = f"{type(caught).__name__}: {_summarize(caught)}"
+                    self.diagnostic_results.append(Diagnostic("failed", message))
             except BaseException:
                 with self.lock:
                     self.installing_thread = None
@@ -2079,6 +2103,7 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills, model_connect
         message_cursor = state["message_count"]
         seen_messages = message_cursor
         limit_error = None
+        stream_error = None
         try:
             for result in agent.stream(
                 agent_input,
@@ -2115,19 +2140,23 @@ def _run_agent(source, settings, evaluator, workspace_dir, skills, model_connect
                 f"agent reached max_model_calls={settings.max_model_calls}; checking its current attempt",
                 flush=True,
             )
+        except Exception as error:
+            stream_error = error
         messages = result.get("messages", [])
         call_count = call_counter.count
         if settings.debug:
             # Each trace owns one turn; cumulative files would duplicate history
             # quadratically.
-            workspace.write_report(
-                f"trace_{state['turn']:02d}",
-                {
-                    "messages": messages_to_dict(messages[message_cursor:]),
-                    "model_call_limit_reached": limit_error is not None,
-                    "model_calls": call_count,
-                },
-            )
+            trace = {
+                "messages": messages_to_dict(messages[message_cursor:]),
+                "model_call_limit_reached": limit_error is not None,
+                "model_calls": call_count,
+            }
+            if stream_error is not None:
+                trace["error"] = f"{type(stream_error).__name__}: {_summarize(stream_error)}"
+            workspace.write_report(f"trace_{state['turn']:02d}", trace)
+        if stream_error is not None:
+            raise stream_error
         try:
             attempt_path, candidate = workspace.read_candidate(path)
         except (OSError, UnicodeError, ValueError) as error:

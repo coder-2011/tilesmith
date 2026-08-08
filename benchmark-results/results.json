@@ -1,14 +1,21 @@
 {
   "agent_model": "openai/gpt-5.5",
   "cuda": "13.0",
+  "diagnostic_source": "Recovered from the original Modal console output; structured traces were not enabled.",
   "gpu": "NVIDIA L4",
   "max_model_calls": 24,
   "results": [
     {
       "loops": 1,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "failed",
+          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+        }
+      ],
+      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -55,8 +62,14 @@
     {
       "loops": 2,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "failed",
+          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+        }
+      ],
+      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -103,8 +116,14 @@
     {
       "loops": 3,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "failed",
+          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+        }
+      ],
+      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -151,8 +170,14 @@
     {
       "loops": 1,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "failed",
+          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+        }
+      ],
+      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -199,8 +224,14 @@
     {
       "loops": 2,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "failed",
+          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+        }
+      ],
+      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -247,8 +278,14 @@
     {
       "loops": 3,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "failed",
+          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+        }
+      ],
+      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -295,8 +332,14 @@
     {
       "loops": 1,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "ineligible",
+          "message": "no eligible TorchInductor CUDA graph reached Tilesmith"
+        }
+      ],
+      "tilesmith_error": "no eligible TorchInductor CUDA graph reached Tilesmith",
+      "tilesmith_status": "ineligible",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -343,8 +386,14 @@
     {
       "loops": 2,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "ineligible",
+          "message": "no eligible TorchInductor CUDA graph reached Tilesmith"
+        }
+      ],
+      "tilesmith_error": "no eligible TorchInductor CUDA graph reached Tilesmith",
+      "tilesmith_status": "ineligible",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
@@ -391,8 +440,14 @@
     {
       "loops": 3,
       "tilesmith_benchmarks": [],
-      "tilesmith_error": null,
-      "tilesmith_status": "fallback",
+      "tilesmith_diagnostics": [
+        {
+          "kind": "ineligible",
+          "message": "no eligible TorchInductor CUDA graph reached Tilesmith"
+        }
+      ],
+      "tilesmith_error": "no eligible TorchInductor CUDA graph reached Tilesmith",
+      "tilesmith_status": "ineligible",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {

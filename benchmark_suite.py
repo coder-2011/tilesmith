@@ -1,4 +1,4 @@
-"""Benchmark Tilesmith on MoE, MNIST CNN, and attention-LSTM inference workloads."""
+"""Benchmark Tilesmith on MoE, CNN, and explicit recurrent inference workloads."""
 
 import copy
 import dataclasses
@@ -139,20 +139,27 @@ def _workloads(torch):
             """Return ten class logits for each MNIST-shaped image."""
             return self.classifier(self.features(images))
 
-    class AttentionLSTM(nn.Module):
-        """Classify token sequences with a two-layer LSTM and learned attention pooling."""
+    class AttentionRNN(nn.Module):
+        """Classify token sequences with an Inductor-visible recurrent attention model."""
 
         def __init__(self):
-            """Create the recurrent attention inference workload."""
+            """Create the explicit recurrent cell and learned attention pooling layers."""
             super().__init__()
             self.embedding = nn.Embedding(8_192, 256)
-            self.lstm = nn.LSTM(256, 256, num_layers=2, batch_first=True)
+            self.input_projection = nn.Linear(256, 256)
+            self.recurrent_projection = nn.Linear(256, 256, bias=False)
             self.attention = nn.Sequential(nn.Linear(256, 128), nn.Tanh(), nn.Linear(128, 1))
             self.classifier = nn.Linear(256, 4)
 
         def forward(self, token_ids):
-            """Pool recurrent states with attention and return four class logits."""
-            states, _ = self.lstm(self.embedding(token_ids))
+            """Unroll a fixed recurrent dependency, then return four class logits."""
+            embedded = self.input_projection(self.embedding(token_ids))
+            hidden = torch.zeros_like(embedded[:, 0])
+            states = []
+            for step in range(embedded.shape[1]):
+                hidden = torch.tanh(embedded[:, step] + self.recurrent_projection(hidden))
+                states.append(hidden)
+            states = torch.stack(states, dim=1)
             weights = functional.softmax(self.attention(states), dim=1)
             return self.classifier((states * weights).sum(dim=1))
 
@@ -160,7 +167,7 @@ def _workloads(torch):
     return {
         "moe_transformer": (MoETransformer, lambda: (torch.randint(0, 2_048, (8, 128), device=device),)),
         "mnist_cnn": (MnistCNN, lambda: (torch.randn(256, 1, 28, 28, device=device),)),
-        "attention_lstm": (AttentionLSTM, lambda: (torch.randint(0, 8_192, (64, 128), device=device),)),
+        "attention_rnn": (AttentionRNN, lambda: (torch.randint(0, 8_192, (64, 32), device=device),)),
     }
 
 
@@ -193,17 +200,35 @@ def _run_case(torch, tilesmith, name, factory, inputs, agent_model, loops, max_m
             inputs,
         )
         result["tilesmith_benchmarks"] = [dataclasses.asdict(value) for value in tilesmith.benchmarks(optimized)]
-        result["tilesmith_status"] = "optimized" if result["tilesmith_benchmarks"] else "fallback"
+        result["tilesmith_diagnostics"] = [dataclasses.asdict(value) for value in tilesmith.diagnostics(optimized)]
+        result["tilesmith_run_id"] = getattr(optimized, "_tilesmith_run_id", None)
+        # A callable can mix accepted graphs with ordinary-Inductor fallbacks, so report partial success explicitly.
+        if result["tilesmith_benchmarks"]:
+            result["tilesmith_status"] = "partial" if result["tilesmith_diagnostics"] else "optimized"
+        elif any(value["kind"] == "failed" for value in result["tilesmith_diagnostics"]):
+            result["tilesmith_status"] = "failed"
+        else:
+            result["tilesmith_status"] = "ineligible"
+            if not result["tilesmith_diagnostics"]:
+                result["tilesmith_diagnostics"].append(
+                    {
+                        "kind": "ineligible",
+                        "message": "no eligible TorchInductor CUDA graph reached Tilesmith",
+                    }
+                )
+        if result["tilesmith_status"] in {"failed", "ineligible"}:
+            result["tilesmith_error"] = "; ".join(value["message"] for value in result["tilesmith_diagnostics"])
     except Exception as error:
         timings = _benchmark(torch, {"pytorch_base": eager, "torch_compile": inductor}, inputs)
         result["tilesmith_benchmarks"] = []
+        result["tilesmith_diagnostics"] = []
         result["tilesmith_status"] = "error"
         result["tilesmith_error"] = f"{type(error).__name__}: {error}"
     result["timings"] = timings
     base_ms = timings["pytorch_base"]["median_ms"]
     inductor_ms = timings["torch_compile"]["median_ms"]
     result["torch_compile_vs_pytorch_base"] = base_ms / inductor_ms
-    if result["tilesmith_status"] == "optimized":
+    if result["tilesmith_status"] in {"optimized", "partial"}:
         tilesmith_ms = timings["tilesmith"]["median_ms"]
         result["tilesmith_vs_pytorch_base"] = base_ms / tilesmith_ms
         result["tilesmith_vs_torch_compile"] = inductor_ms / tilesmith_ms
@@ -263,7 +288,7 @@ def _svg(width, height, shapes):
 def _write_latency_chart(results, output):
     """Write the eager, TorchInductor, and Tilesmith latency comparison chart."""
     colors = {"pytorch_base": "#94a3b8", "torch_compile": "#2563eb", "tilesmith": "#16a34a"}
-    names = ("moe_transformer", "mnist_cnn", "attention_lstm")
+    names = tuple(dict.fromkeys(value["workload"] for value in results))
     grouped = {name: [value for value in results if value["workload"] == name] for name in names}
     shapes = ['<text x="40" y="38" class="title">Latency by workload and optimization loops</text>']
     shapes.extend(
@@ -290,7 +315,7 @@ def _write_latency_chart(results, output):
             center = left + 52 + group * 92
             shapes.append(f'<text x="{center}" y="430" text-anchor="middle" class="small">loops={value["loops"]}</text>')
             for offset, key in enumerate(colors):
-                if key == "tilesmith" and value.get("tilesmith_status") != "optimized":
+                if key == "tilesmith" and value.get("tilesmith_status") not in {"optimized", "partial"}:
                     continue
                 timing = value["timings"].get(key)
                 if timing is None:
@@ -307,7 +332,8 @@ def _write_latency_chart(results, output):
 # _write_speedup_chart renders Tilesmith's measured speedup against TorchInductor.
 def _write_speedup_chart(results, output):
     """Write the Tilesmith-versus-TorchInductor speedup chart."""
-    colors = {"moe_transformer": "#7c3aed", "mnist_cnn": "#ea580c", "attention_lstm": "#0891b2"}
+    names = tuple(dict.fromkeys(value["workload"] for value in results))
+    colors = dict(zip(names, ("#7c3aed", "#ea580c", "#0891b2"), strict=False))
     left, top, right, bottom = 90, 95, 830, 410
     finite = [value["tilesmith_vs_torch_compile"] for value in results if value["tilesmith_vs_torch_compile"] is not None]
     if not finite:

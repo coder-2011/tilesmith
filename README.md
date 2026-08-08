@@ -18,11 +18,14 @@ output = optimized_model(x)
 
 for result in tilesmith.benchmarks(optimized_model):
     print(result.torch_inductor_ms, result.tilesmith_ms, result.speedup)
+
+for diagnostic in tilesmith.diagnostics(optimized_model):
+    print(diagnostic.kind, diagnostic.message)
 ```
 
 `optimized_model` remains a normal `torch.compile` callable. Tilesmith does not
 replace PyTorch or ask the model to rewrite the user's module. Benchmark results
-appear after the first call because optimization is lazy.
+and fallback diagnostics appear after the first call because optimization is lazy.
 
 ## Install
 

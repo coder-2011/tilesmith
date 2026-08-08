@@ -79,6 +79,14 @@ graphs. `torch_inductor_ms` is the original PyTorch-generated graph, not eager
 PyTorch. `cached=True` means the numbers came from the exact accepted artifact's
 saved benchmark instead of a new timing run.
 
+When the result tuple stays empty, inspect the exact graph rejection or agent
+failure instead of inferring success from the fallback callable:
+
+```python
+for diagnostic in tilesmith.diagnostics(optimized_model):
+    print(diagnostic.kind, diagnostic.message)
+```
+
 ## Control the optimization
 
 ```python
@@ -162,7 +170,7 @@ destroyed afterward.
 | `TILESMITH_CLIPROXYAPI_AUTH_DIR` | `~/.cli-proxy-api` | Codex-login directory |
 | `TILESMITH_MIN_IMPROVEMENT` | `0.02` | Required fractional speedup |
 | `TILESMITH_TIMEOUT` | `1200` | Optimization timeout in seconds |
-| `TILESMITH_MAX_OUTPUT_TOKENS` | `16384` | Maximum tokens in one agent-model response |
+| `TILESMITH_MAX_OUTPUT_TOKENS` | `8192` | Maximum tokens in one agent-model response |
 | `TILESMITH_SANDBOX_TIMEOUT` | `3600` | ComputeSDK sandbox lifetime in seconds |
 | `TILESMITH_CACHE_DIR` | `~/.cache/tilesmith` | Cache and run evidence directory |
 | `TILESMITH_DEBUG` | unset | Set to `1` to retain complete per-turn agent traces |
