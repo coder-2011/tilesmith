@@ -118,7 +118,7 @@ def _download_evidence(result, output_dir):
 # main submits the remote suite and creates charts on the caller's filesystem.
 @APP.local_entrypoint()
 def main(
-    agent_model: str = "openai/gpt-5.5",
+    agent_model: str = "gpt-5.5",
     loops: str = "1,2,3",
     max_model_calls: int = 24,
     max_output_tokens: int = 8_192,
