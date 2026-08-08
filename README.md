@@ -37,9 +37,10 @@ python3 -m pip install tilesmith-ai
 export OPENAI_API_KEY=...
 ```
 
-`OPENROUTER_API_KEY` is supported as an alternative. An OpenAI-compatible
-gateway can be selected with `OPENAI_BASE_URL`. Without an API key, install
-and log in to `cliproxyapi` with Codex OAuth:
+Tilesmith tries an explicit OpenAI-compatible endpoint, Codex login, and then
+OpenRouter, selecting the first route that exposes the requested model.
+`OPENROUTER_API_KEY` is therefore only an optional fallback. Install and log in
+to `cliproxyapi` to make Codex OAuth available:
 
 ```sh
 cliproxyapi -codex-login

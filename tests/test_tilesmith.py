@@ -210,6 +210,41 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertNotIn("`gpu_shell`", prompt)
         self.assertNotIn("candidate.py` is the only remote file you may edit", prompt)
 
+    # test_model_connection_uses_first_working_route covers ordered fallback without starting an agent.
+    def test_model_connection_uses_first_working_route(self):
+        """Skip unavailable routes and stop at the first configured route that works."""
+        calls = []
+
+        # wait_for_model rejects each unavailable route and accepts the final configured fallback.
+        def wait_for_model(model, api_key, base_url):
+            calls.append((model, api_key, base_url))
+            if api_key != "openrouter-key":
+                raise RuntimeError("model unavailable")
+
+        environment = {
+            "OPENAI_API_KEY": "openai-key",
+            "OPENAI_BASE_URL": "https://custom.example/v1",
+            "OPENROUTER_API_KEY": "openrouter-key",
+        }
+        codex_connection = contextlib.nullcontext(("codex-key", "http://codex.test/v1"))
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            patch.object(tilesmith, "_codex_login_installation", return_value=("proxy", Path("auth"))),
+            patch.object(tilesmith, "_codex_model_connection", return_value=codex_connection),
+            patch.object(tilesmith, "_wait_for_model", side_effect=wait_for_model),
+            tilesmith._model_connection("gpt-test") as connection,
+        ):
+            self.assertEqual(connection, ("openrouter-key", "https://openrouter.ai/api/v1"))
+
+        self.assertEqual(
+            calls,
+            [
+                ("gpt-test", "openai-key", "https://custom.example/v1"),
+                ("gpt-test", "codex-key", "http://codex.test/v1"),
+                ("gpt-test", "openrouter-key", "https://openrouter.ai/api/v1"),
+            ],
+        )
+
     # test_skill_snapshot_stabilizes_prompt protects cache identity from concurrent file edits.
     def test_skill_snapshot_stabilizes_prompt(self):
         """Keep prompts tied to the skill snapshot used by the cache key."""

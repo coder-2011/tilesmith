@@ -333,8 +333,8 @@ def _resolve_agent_model(agent_model):
 # _agent_is_configured checks for a usable API key or externally owned Codex login without starting either route.
 def _agent_is_configured():
     """Return whether a supported model connection has enough local configuration to start."""
-    api_key, _ = _api_key_connection()
-    return api_key is not None or _codex_login_installation() is not None
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+    return bool(api_key) or _codex_login_installation() is not None
 
 
 # _read_compute_config validates a direct provider before provisioning a billable sandbox.
@@ -1816,17 +1816,6 @@ def _agent_instructions(settings, evaluator, skills):
     return "\n\n".join(sections)
 
 
-# _api_key_connection normalizes the supported direct OpenAI-compatible credential sources.
-def _api_key_connection():
-    """Return an API key and endpoint when the user configured direct API access."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL")
-    if not api_key:
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        base_url = "https://openrouter.ai/api/v1"
-    return api_key, base_url
-
-
 # _codex_login_installation locates the external CLIProxyAPI login without reading its credentials.
 def _codex_login_installation():
     """Return the configured CLIProxyAPI executable and auth directory, or None when unavailable."""
@@ -1874,18 +1863,10 @@ def _stop_proxy(process):
         process.wait()
 
 
-# _model_connection keeps one direct API or Codex-login route alive for a complete agent run.
+# _codex_model_connection keeps one private login proxy alive while its route is being considered or used.
 @contextlib.contextmanager
-def _model_connection(model):
-    """Yield OpenAI-compatible credentials after confirming that the selected model is available."""
-    api_key, base_url = _api_key_connection()
-    if api_key:
-        _wait_for_model(model, api_key, base_url)
-        yield api_key, base_url
-        return
-    installation = _codex_login_installation()
-    if installation is None:
-        raise RuntimeError("configure OPENAI_API_KEY, OPENROUTER_API_KEY, or CLIProxyAPI Codex login")
+def _codex_model_connection(installation):
+    """Yield temporary loopback credentials backed by one existing Codex login."""
     executable, auth_directory = installation
     api_key = secrets.token_urlsafe(32)
     port = _loopback_port()
@@ -1901,11 +1882,40 @@ def _model_connection(model):
             stderr=subprocess.DEVNULL,
         )
         try:
-            base_url = f"http://127.0.0.1:{port}/v1"
-            _wait_for_model(model, api_key, base_url)
-            yield api_key, base_url
+            yield api_key, f"http://127.0.0.1:{port}/v1"
         finally:
             _stop_proxy(process)
+
+
+# _model_connection selects the first configured route that exposes the requested model.
+@contextlib.contextmanager
+def _model_connection(model):
+    """Probe configured routes in priority order and yield the first usable connection."""
+    routes = []
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if openai_api_key:
+        connection = openai_api_key, os.environ.get("OPENAI_BASE_URL")
+        routes.append(("OPENAI_API_KEY", contextlib.nullcontext(connection)))
+    installation = _codex_login_installation()
+    if installation is not None:
+        routes.append(("Codex login", _codex_model_connection(installation)))
+    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_api_key:
+        connection = openrouter_api_key, "https://openrouter.ai/api/v1"
+        routes.append(("OPENROUTER_API_KEY", contextlib.nullcontext(connection)))
+    if not routes:
+        raise RuntimeError("configure OPENAI_API_KEY, OPENROUTER_API_KEY, or CLIProxyAPI Codex login")
+    failures = []
+    for name, route in routes:
+        with route as connection:
+            try:
+                _wait_for_model(model, *connection)
+            except Exception as error:
+                failures.append(f"{name}: {_summarize(error)}")
+                continue
+            yield connection
+            return
+    raise RuntimeError(f"no configured model route can serve {model!r}: {'; '.join(failures)}")
 
 
 # _wait_for_model prevents startup races from consuming a GPU before its model is ready.

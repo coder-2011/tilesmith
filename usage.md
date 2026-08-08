@@ -18,9 +18,10 @@ To enable optimization, configure one model route:
 export OPENAI_API_KEY=...
 ```
 
-`OPENROUTER_API_KEY` also works; set `OPENAI_BASE_URL` to use another
-OpenAI-compatible gateway. Alternatively, without any API key, install and log
-in to `cliproxyapi` with Codex OAuth. Tilesmith detects its existing login at
+Tilesmith tries an explicit OpenAI-compatible endpoint, Codex login, and then
+OpenRouter, selecting the first route that exposes the requested model.
+`OPENROUTER_API_KEY` is only an optional fallback. Install and log in to
+`cliproxyapi` with Codex OAuth. Tilesmith detects its existing login at
 `~/.cli-proxy-api`; `TILESMITH_CLIPROXYAPI_EXECUTABLE` and
 `TILESMITH_CLIPROXYAPI_AUTH_DIR` override the executable and login directory.
 
