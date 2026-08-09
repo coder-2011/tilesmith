@@ -31,6 +31,24 @@ config copy, preserving provider and routing settings while replacing only the
 loopback server address, TLS, client key, auth directory, and file logging. It
 does not modify the source config.
 
+API keys can also be exported directly. Tilesmith converts these conventional
+variables into provider entries in that same temporary CLIProxyAPI config:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+export TILESMITH_MODEL=claude-sonnet-4-6
+```
+
+It recognizes `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or
+`GOOGLE_API_KEY`, `XAI_API_KEY`, `VERTEX_API_KEY`, and `OPENROUTER_API_KEY`.
+For another OpenAI-compatible service, export both its key and base URL:
+
+```sh
+export TILESMITH_API_KEY=...
+export TILESMITH_API_BASE_URL=https://provider.example/v1
+export TILESMITH_MODEL=provider-model
+```
+
 ## Compile a model
 
 ```python
@@ -172,6 +190,8 @@ destroyed afterward.
 | `TILESMITH_CLIPROXYAPI_EXECUTABLE` | `cliproxyapi` on `PATH` | Proxy executable |
 | `TILESMITH_CLIPROXYAPI_AUTH_DIR` | `~/.cli-proxy-api` | CLIProxyAPI account directory |
 | `TILESMITH_CLIPROXYAPI_CONFIG` | auto-detected | CLIProxyAPI provider and routing config |
+| Conventional provider API keys | unset | Upstream keys converted into temporary CLIProxyAPI entries |
+| `TILESMITH_API_KEY`, `TILESMITH_API_BASE_URL` | unset | Key and URL for any OpenAI-compatible upstream |
 | `TILESMITH_MIN_IMPROVEMENT` | `0.02` | Required fractional speedup |
 | `TILESMITH_TIMEOUT` | `1200` | Optimization timeout in seconds |
 | `TILESMITH_MAX_OUTPUT_TOKENS` | `8192` | Maximum tokens in one agent-model response |
@@ -212,5 +232,6 @@ The end-to-end benchmark does provision the requested ComputeSDK GPU and may
 incur provider charges:
 
 ```sh
-python3 moe_benchmark.py run --chip L4 --model openai/gpt-5.5
+export OPENAI_API_KEY=...
+python3 moe_benchmark.py run --chip L4 --model gpt-5.5
 ```

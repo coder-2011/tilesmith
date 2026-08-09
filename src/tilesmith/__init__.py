@@ -60,6 +60,21 @@ SANDBOX_READY_TIMEOUT_MS = 15 * 60 * 1000
 UPLOAD_CHUNK_BYTES = 384 * 1024  # Divisible by 3 so base64 chunks concatenate.
 REFERENCE_START = "# --- TILESMITH PYTORCH FX REFERENCE (NOT EXECUTED) ---"
 REFERENCE_END = "# --- END TILESMITH PYTORCH FX REFERENCE ---"
+# Conventional provider variables become CLIProxyAPI credentials, never alternate transports.
+_CLIPROXY_NATIVE_API_KEYS = {
+    "OPENAI_API_KEY": "codex-api-key",
+    "ANTHROPIC_API_KEY": "claude-api-key",
+    "GEMINI_API_KEY": "gemini-api-key",
+    "GOOGLE_API_KEY": "gemini-api-key",
+    "XAI_API_KEY": "xai-api-key",
+    "VERTEX_API_KEY": "vertex-api-key",
+}
+_CLIPROXY_API_ENVIRONMENT = (
+    *_CLIPROXY_NATIVE_API_KEYS,
+    "OPENROUTER_API_KEY",
+    "TILESMITH_API_KEY",
+    "TILESMITH_API_BASE_URL",
+)
 
 AGENT_PROMPT = """You optimize the complete Python wrapper emitted by TorchInductor for one CUDA graph.
 PyTorch has already finished Dynamo capture, AOTAutograd, and Inductor code generation before you receive this file. Work only on this final generated implementation, never on the original model or FX reference comments.
@@ -1822,6 +1837,7 @@ def _cliproxy_installation():
     """Return the CLIProxyAPI executable, auth directory, and optional provider config."""
     executable = os.environ.get("TILESMITH_CLIPROXYAPI_EXECUTABLE") or shutil.which("cliproxyapi")
     auth_directory = Path(os.environ.get("TILESMITH_CLIPROXYAPI_AUTH_DIR", Path.home() / ".cli-proxy-api")).expanduser()
+    has_environment_api = any(os.environ.get(name, "").strip() for name in _CLIPROXY_API_ENVIRONMENT)
     configured_path = os.environ.get("TILESMITH_CLIPROXYAPI_CONFIG")
     if configured_path:
         config_path = Path(configured_path).expanduser()
@@ -1835,7 +1851,7 @@ def _cliproxy_installation():
             Path("/usr/local/etc/cliproxyapi.conf"),
         )
         config_path = next((path for path in candidates if path.is_file()), None)
-    if executable is None or (not auth_directory.is_dir() and config_path is None):
+    if executable is None or (not auth_directory.is_dir() and config_path is None and not has_environment_api):
         return None
     return executable, auth_directory, config_path
 
@@ -1848,8 +1864,66 @@ def _loopback_port():
         return listener.getsockname()[1]
 
 
+# _openai_compatible_provider maps one exported key to CLIProxyAPI's generic upstream format.
+def _openai_compatible_provider(name, base_url, api_key, model):
+    """Return one OpenAI-compatible CLIProxyAPI route for the requested model."""
+    return {
+        "name": name,
+        "base-url": base_url,
+        "api-key-entries": [{"api-key": api_key}],
+        "models": [{"name": model, "alias": model}],
+    }
+
+
+# _add_environment_providers translates exported provider keys into CLIProxyAPI configuration.
+def _add_environment_providers(config, model):
+    """Merge exported upstream credentials into one temporary CLIProxyAPI config."""
+    seen = set()
+    for environment_name, section in _CLIPROXY_NATIVE_API_KEYS.items():
+        provider_key = os.environ.get(environment_name, "").strip()
+        identity = section, provider_key
+        if not provider_key or identity in seen:
+            continue
+        seen.add(identity)
+        entries = config.get(section)
+        if entries is None:
+            entries = []
+            config[section] = entries
+        if not isinstance(entries, list):
+            raise RuntimeError(f"CLIProxyAPI config field {section!r} must contain a list")
+        already_configured = any(isinstance(entry, dict) and entry.get("api-key") == provider_key for entry in entries)
+        if not already_configured:
+            entries.append({"api-key": provider_key})
+
+    compatibility = []
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if openrouter_key:
+        compatibility.append(
+            _openai_compatible_provider("openrouter-env", "https://openrouter.ai/api/v1", openrouter_key, model)
+        )
+
+    generic_key = os.environ.get("TILESMITH_API_KEY", "").strip()
+    generic_base_url = os.environ.get("TILESMITH_API_BASE_URL", "").strip()
+    if bool(generic_key) != bool(generic_base_url):
+        raise RuntimeError("TILESMITH_API_KEY and TILESMITH_API_BASE_URL must be exported together")
+    if generic_key:
+        compatibility.append(_openai_compatible_provider("tilesmith-env", generic_base_url, generic_key, model))
+    if not compatibility:
+        return
+
+    existing = config.get("openai-compatibility")
+    if existing is None:
+        existing = []
+    if not isinstance(existing, list):
+        raise RuntimeError("CLIProxyAPI config field 'openai-compatibility' must contain a list")
+    # An exported compatibility key replaces only a same-named route in the temporary copy.
+    environment_names = {provider["name"] for provider in compatibility}
+    preserved = [provider for provider in existing if not isinstance(provider, dict) or provider.get("name") not in environment_names]
+    config["openai-compatibility"] = [*preserved, *compatibility]
+
+
 # _cliproxy_config preserves upstream providers while privatizing the temporary proxy server.
-def _cliproxy_config(port, auth_directory, api_key, source_path=None):
+def _cliproxy_config(port, auth_directory, api_key, model, source_path=None):
     """Return a loopback config retaining OAuth, API-provider, and routing settings."""
     config = {}
     if source_path is not None:
@@ -1859,6 +1933,7 @@ def _cliproxy_config(port, auth_directory, api_key, source_path=None):
             if not isinstance(loaded, dict):
                 raise RuntimeError(f"CLIProxyAPI config must contain a YAML mapping: {source_path}")
             config = loaded
+    _add_environment_providers(config, model)
     # These fields control only TileSmith's private client-to-proxy connection.
     config.update(
         {
@@ -1903,7 +1978,7 @@ def _model_connection(model):
             auth_directory.mkdir()
         config_path = Path(directory) / "config.yaml"
         config_path.write_text(
-            _cliproxy_config(port, auth_directory, api_key, source_path),
+            _cliproxy_config(port, auth_directory, api_key, model, source_path),
             encoding="utf-8",
         )
         process = subprocess.Popen(

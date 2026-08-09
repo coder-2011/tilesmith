@@ -14,6 +14,23 @@ CUDA_SKILL_ROOT = SKILL_ROOT / "high-performance-cuda"
 CLIPROXY_VERSION = "7.2.120"
 CLIPROXY_ARCHIVE = f"CLIProxyAPI_{CLIPROXY_VERSION}_linux_amd64.tar.gz"
 CLIPROXY_SHA256 = "8933332737338be5d5cedae4b96254b9afc8dfe0f13c4322738c65fd7931ce0a"
+CLIPROXY_API_KEYS = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "XAI_API_KEY",
+    "VERTEX_API_KEY",
+    "OPENROUTER_API_KEY",
+    "TILESMITH_API_KEY",
+)
+CLIPROXY_API_ENVIRONMENT = (
+    *CLIPROXY_API_KEYS,
+    "TILESMITH_API_BASE_URL",
+)
+# Exported provider credentials enter the remote container only through a Modal secret.
+_exported_api_environment = [name for name in CLIPROXY_API_ENVIRONMENT if os.environ.get(name)]
+CLIPROXY_API_SECRETS = [modal.Secret.from_local_environ(_exported_api_environment)] if _exported_api_environment else []
 IMAGE = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ca-certificates", "curl")
@@ -48,6 +65,7 @@ CLIPROXY_AUTH_VOLUME = modal.Volume.from_name("tilesmith-cliproxyapi-auth", crea
     image=IMAGE,
     gpu="L4",
     timeout=14_400,
+    secrets=CLIPROXY_API_SECRETS,
     env={"PYTHONPATH": "/root/src", "TILESMITH_DEBUG": "1"},
     volumes={
         "/root/.cache/tilesmith": EVIDENCE_VOLUME,
@@ -80,15 +98,24 @@ def _parse_loops(value):
     return loops
 
 
-# _require_cliproxy_configuration prevents a GPU launch without an OAuth account or API config.
+# _require_cliproxy_configuration prevents a GPU launch without OAuth, config, or exported API credentials.
 def _require_cliproxy_configuration():
-    """Require CLIProxyAPI OAuth files or a provider config at the volume root."""
+    """Require CLIProxyAPI OAuth files, a provider config, or exported API credentials."""
+    generic_key = bool(os.environ.get("TILESMITH_API_KEY"))
+    generic_base_url = bool(os.environ.get("TILESMITH_API_BASE_URL"))
+    if generic_key != generic_base_url:
+        raise RuntimeError("TILESMITH_API_KEY and TILESMITH_API_BASE_URL must be exported together")
+    if any(os.environ.get(name) for name in CLIPROXY_API_KEYS):
+        return
     entries = CLIPROXY_AUTH_VOLUME.listdir("/", recursive=False)
     if any(entry.type.name == "FILE" for entry in entries):
         return
     oauth_command = "modal volume put tilesmith-cliproxyapi-auth ~/.cli-proxy-api ."
     api_command = "modal volume put tilesmith-cliproxyapi-auth path/to/config.yaml config.yaml"
-    raise RuntimeError(f"CLIProxyAPI volume is empty; upload OAuth files with `{oauth_command}` or an API config with `{api_command}`")
+    raise RuntimeError(
+        f"CLIProxyAPI is unconfigured; export a provider API key, upload OAuth files with `{oauth_command}`, "
+        f"or upload an API config with `{api_command}`"
+    )
 
 
 # _download_evidence copies only this sweep's persistent run directories to the result folder.

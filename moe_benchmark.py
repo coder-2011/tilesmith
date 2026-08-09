@@ -16,6 +16,20 @@ ROOT = Path(__file__).resolve().parent
 REMOTE_ROOT = "/tmp/tilesmith-moe"
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 LOG_CHUNK_BYTES = 256 * 1024
+CLIPROXY_VERSION = "7.2.120"
+CLIPROXY_ARCHIVE = f"CLIProxyAPI_{CLIPROXY_VERSION}_linux_amd64.tar.gz"
+CLIPROXY_SHA256 = "8933332737338be5d5cedae4b96254b9afc8dfe0f13c4322738c65fd7931ce0a"
+CLIPROXY_API_KEYS = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "XAI_API_KEY",
+    "VERTEX_API_KEY",
+    "OPENROUTER_API_KEY",
+    "TILESMITH_API_KEY",
+)
+CLIPROXY_API_ENVIRONMENT = (*CLIPROXY_API_KEYS, "TILESMITH_API_BASE_URL")
 
 
 # _require_success turns one remote process failure into a bounded host error.
@@ -27,19 +41,22 @@ def _require_success(result, operation):
     raise RuntimeError(f"{operation} failed with exit code {result.exit_code}: {details}")
 
 
-# _agent_environment forwards only the model credential needed by the remote process.
+# _agent_environment forwards exported upstream credentials for the remote CLIProxyAPI process.
 def _agent_environment(model):
-    """Return the secret-safe environment used by the remote Tilesmith agent."""
-    from tilesmith import _model_connection, _wait_for_model
-
-    _wait_for_model(model)
-    api_key, base_url = _model_connection()
+    """Return the exported API route and non-secret remote Tilesmith settings."""
+    generic_key = bool(os.environ.get("TILESMITH_API_KEY"))
+    generic_base_url = bool(os.environ.get("TILESMITH_API_BASE_URL"))
+    if generic_key != generic_base_url:
+        raise RuntimeError("TILESMITH_API_KEY and TILESMITH_API_BASE_URL must be exported together")
+    api_environment = {name: os.environ[name] for name in CLIPROXY_API_ENVIRONMENT if os.environ.get(name)}
+    if not any(name in api_environment for name in CLIPROXY_API_KEYS):
+        raise RuntimeError("the remote benchmark requires an exported provider API key")
     return {
-        "OPENAI_API_KEY": api_key,
-        "OPENAI_BASE_URL": base_url or "",
+        **api_environment,
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPATH": REMOTE_ROOT,
         "TILESMITH_CACHE_DIR": f"{REMOTE_ROOT}/cache",
+        "TILESMITH_CLIPROXYAPI_EXECUTABLE": f"{REMOTE_ROOT}/cli-proxy-api",
         "TILESMITH_MODEL": model,
         "TILESMITH_TIMEOUT": "1200",
     }
@@ -111,6 +128,28 @@ async def _upload_runtime(sandbox, manifest):
         await sandbox.write_file(destination, content)
 
 
+# _install_cliproxy installs one checksum-pinned Linux gateway before the paid worker starts.
+async def _install_cliproxy(sandbox):
+    """Download, verify, and extract the CLIProxyAPI binary in the remote workspace."""
+    release_url = f"https://github.com/router-for-me/CLIProxyAPI/releases/download/v{CLIPROXY_VERSION}/{CLIPROXY_ARCHIVE}"
+    destination = f"{REMOTE_ROOT}/cli-proxy-api"
+    script = (
+        "import hashlib, io, pathlib, tarfile, urllib.request\n"
+        f"with urllib.request.urlopen({release_url!r}, timeout=120) as response:\n"
+        "    archive = response.read()\n"
+        f"if hashlib.sha256(archive).hexdigest() != {CLIPROXY_SHA256!r}:\n"
+        "    raise RuntimeError('CLIProxyAPI archive checksum mismatch')\n"
+        "with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as bundle:\n"
+        "    executable = bundle.extractfile('cli-proxy-api')\n"
+        "    if executable is None:\n"
+        "        raise RuntimeError('CLIProxyAPI archive has no executable')\n"
+        f"    pathlib.Path({destination!r}).write_bytes(executable.read())\n"
+        f"pathlib.Path({destination!r}).chmod(0o755)\n"
+    )
+    result = await sandbox.run_command(shlex.join(["python3", "-c", script]), timeout_ms=180_000)
+    _require_success(result, "CLIProxyAPI installation")
+
+
 # _read_log_chunk transfers each remote log byte at most once.
 async def _read_log_chunk(sandbox, path, offset):
     """Read one bounded base64 log range and return decoded text plus byte count."""
@@ -137,9 +176,12 @@ async def _read_log_chunk(sandbox, path, offset):
 
 # _redact_log prevents the forwarded model credential from appearing in live output.
 def _redact_log(content, environment):
-    """Replace the model API key in one worker-output chunk."""
-    secret = environment.get("OPENAI_API_KEY", "")
-    return content.replace(secret, "[REDACTED]") if secret else content
+    """Replace every forwarded provider API key in one worker-output chunk."""
+    for name in CLIPROXY_API_KEYS:
+        secret = environment.get(name, "")
+        if secret:
+            content = content.replace(secret, "[REDACTED]")
+    return content
 
 
 # _run_worker streams a background process through ordinary sandbox files.
@@ -241,6 +283,7 @@ async def _run_remote(model, chip):
             )
             await sandbox.wait_until_ready(readiness_timeout)
             await _upload_runtime(sandbox, manifest)
+            await _install_cliproxy(sandbox)
             capability = await sandbox.run_command(
                 "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader && df -h /",
                 timeout_ms=60_000,

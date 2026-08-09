@@ -228,6 +228,13 @@ class TilesmithAgentTests(unittest.TestCase):
             }
             with patch.dict("os.environ", environment, clear=True):
                 self.assertEqual(tilesmith._cliproxy_installation(), ("proxy", Path(directory) / "missing-auth", config_path))
+            environment = {
+                "TILESMITH_CLIPROXYAPI_EXECUTABLE": "proxy",
+                "TILESMITH_CLIPROXYAPI_AUTH_DIR": str(Path(directory) / "missing-auth"),
+                "OPENAI_API_KEY": "exported-secret",
+            }
+            with patch.dict("os.environ", environment, clear=True), patch.object(Path, "is_file", return_value=False):
+                self.assertEqual(tilesmith._cliproxy_installation(), ("proxy", Path(directory) / "missing-auth", None))
 
     # test_cliproxy_config_preserves_api_providers protects every upstream setting from the private overlay.
     def test_cliproxy_config_preserves_api_providers(self):
@@ -249,10 +256,40 @@ class TilesmithAgentTests(unittest.TestCase):
             )
             source_path.write_text(source, encoding="utf-8")
 
-            rendered = tilesmith._cliproxy_config(9123, Path("/private/auth"), "temporary-client-key", source_path)
+            environment = {
+                "OPENAI_API_KEY": "openai-secret",
+                "ANTHROPIC_API_KEY": "anthropic-secret",
+                "GEMINI_API_KEY": "gemini-secret",
+                "GOOGLE_API_KEY": "gemini-secret",
+                "XAI_API_KEY": "xai-secret",
+                "VERTEX_API_KEY": "vertex-secret",
+                "OPENROUTER_API_KEY": "openrouter-secret",
+                "TILESMITH_API_KEY": "custom-secret",
+                "TILESMITH_API_BASE_URL": "https://models.example/v1",
+            }
+            with patch.dict("os.environ", environment, clear=True):
+                rendered = tilesmith._cliproxy_config(
+                    9123,
+                    Path("/private/auth"),
+                    "temporary-client-key",
+                    "test-model",
+                    source_path,
+                )
             config = yaml.safe_load(rendered)
 
-            self.assertEqual(config["codex-api-key"], [{"api-key": "upstream-secret", "prefix": "paid"}])
+            self.assertEqual(
+                config["codex-api-key"],
+                [{"api-key": "upstream-secret", "prefix": "paid"}, {"api-key": "openai-secret"}],
+            )
+            self.assertEqual(config["claude-api-key"], [{"api-key": "anthropic-secret"}])
+            self.assertEqual(config["gemini-api-key"], [{"api-key": "gemini-secret"}])
+            self.assertEqual(config["xai-api-key"], [{"api-key": "xai-secret"}])
+            self.assertEqual(config["vertex-api-key"], [{"api-key": "vertex-secret"}])
+            compatibility = {provider["name"]: provider for provider in config["openai-compatibility"]}
+            self.assertEqual(compatibility["openrouter-env"]["base-url"], "https://openrouter.ai/api/v1")
+            self.assertEqual(compatibility["openrouter-env"]["api-key-entries"], [{"api-key": "openrouter-secret"}])
+            self.assertEqual(compatibility["tilesmith-env"]["base-url"], "https://models.example/v1")
+            self.assertEqual(compatibility["tilesmith-env"]["models"], [{"name": "test-model", "alias": "test-model"}])
             self.assertEqual(config["routing"], {"strategy": "round-robin"})
             self.assertEqual(
                 {key: config[key] for key in ("host", "port", "tls", "auth-dir", "api-keys", "logging-to-file")},
@@ -266,6 +303,11 @@ class TilesmithAgentTests(unittest.TestCase):
                 },
             )
             self.assertEqual(source_path.read_text(encoding="utf-8"), source)
+            with (
+                patch.dict("os.environ", {"TILESMITH_API_KEY": "unpaired-secret"}, clear=True),
+                self.assertRaisesRegex(RuntimeError, "must be exported together"),
+            ):
+                tilesmith._cliproxy_config(9123, Path("/private/auth"), "temporary-client-key", "test-model")
 
     # test_skill_snapshot_stabilizes_prompt protects cache identity from concurrent file edits.
     def test_skill_snapshot_stabilizes_prompt(self):

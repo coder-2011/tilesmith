@@ -45,6 +45,18 @@ accounts at `~/.cli-proxy-api` and Homebrew's CLIProxyAPI config; set
 config for each run, preserving provider and routing settings while replacing
 only its private loopback server settings.
 
+Provider keys can instead be exported normally. Tilesmith converts them into
+the temporary CLIProxyAPI config; it does not create a direct provider path:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Supported conventional names are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY`/`GOOGLE_API_KEY`, `XAI_API_KEY`, `VERTEX_API_KEY`, and
+`OPENROUTER_API_KEY`. For any OpenAI-compatible endpoint, export
+`TILESMITH_API_KEY` together with `TILESMITH_API_BASE_URL`.
+
 ## Compile from PyTorch
 
 ```python
