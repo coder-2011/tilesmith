@@ -8,6 +8,7 @@ from pathlib import Path
 
 try:
     from .measurement import (
+        _load_generated,
         assert_candidate_matches,
         assert_tensor_aliases_match,
         assert_tensor_graph_matches,
@@ -18,6 +19,7 @@ try:
 except ImportError:
     # The GPU sandbox runs this copied source as worker.py beside measurement.py.
     from measurement import (
+        _load_generated,
         assert_candidate_matches,
         assert_tensor_aliases_match,
         assert_tensor_graph_matches,
@@ -29,15 +31,6 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(ROOT / "cache")
-
-
-# _load_generated attaches serialized Inductor constants to one generated wrapper.
-def _load_generated(torch, path, constants):
-    from torch._inductor.codecache import PyCodeCache, code_hash
-
-    source = path.read_text(encoding="utf-8")
-    module = PyCodeCache.load_by_key_path(code_hash(source), str(path), attrs=constants)
-    return module.call
 
 
 # _to_cuda restores recursively serialized inputs and constants on the sandbox GPU.
@@ -102,9 +95,8 @@ def _compare(torch, triton):
     baseline_constants = clone_tensor_graph(torch, constants)
     candidate_constants = clone_tensor_graph(torch, constants)
     constant_snapshot = clone_tensor_graph(torch, candidate_constants)
-    baseline = _load_generated(torch, ROOT / "baseline.py", baseline_constants)
+    baseline = _load_generated(ROOT / "baseline.py", baseline_constants)
     candidate = _load_generated(
-        torch,
         ROOT / "candidate.py",
         candidate_constants,
     )
@@ -159,7 +151,7 @@ def _run_generated(torch, triton):
     serialized = torch.load(ROOT / "payload.pt", map_location="cpu", weights_only=False)
     constants = _to_cuda(torch, serialized["constants"])
     inputs = _to_cuda(torch, serialized["inputs"])
-    candidate = _load_generated(torch, ROOT / "candidate.py", constants)
+    candidate = _load_generated(ROOT / "candidate.py", constants)
     with torch.no_grad():
         candidate(list(inputs))
     torch.cuda.synchronize()

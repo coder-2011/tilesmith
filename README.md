@@ -94,7 +94,7 @@ repetitions. It defaults to `1`. A slower, incorrect, duplicate, or marginal
 candidate is rejected and the same loop continues.
 
 `max_model_calls` is an optional exact budget on LangChain model invocations
-shared by the main agent and its subagents. It defaults to `None`; there is no
+across the optimization track. It defaults to `None`; there is no
 default 70-step limit. Provider transport retries remain inside one invocation.
 Shell, tool, benchmark, and graph-transition calls do not consume this budget.
 For example, `max_model_calls=70` permits 70 invocations and blocks the 71st.

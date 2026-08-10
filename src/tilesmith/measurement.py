@@ -232,6 +232,39 @@ def _restore_torch_process_state(torch, state):
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = state["fp16_reduced_precision_reduction"]
 
 
+# _load_generated imports a wrapper without letting it replace shared Inductor dispatch.
+def _load_generated(path, constants, source_hash=None):
+    """Load generated source while restoring and rejecting shared-state mutations."""
+    import torch
+    from torch._inductor.codecache import PyCodeCache, code_hash
+    from torch._inductor.select_algorithm import extern_kernels
+
+    if source_hash is None:
+        source_hash = code_hash(path.read_bytes())
+    process_state = _torch_process_state(torch)
+    extern_kernel_state = dict(vars(extern_kernels))
+    try:
+        module = PyCodeCache.load_by_key_path(source_hash, str(path), attrs=constants)
+    finally:
+        loaded_state = _torch_process_state(torch)
+        loaded_extern_kernel_state = dict(vars(extern_kernels))
+        # Candidate imports cannot retain additions, removals, or replacements in shared dispatch.
+        extern_kernel_namespace = vars(extern_kernels)
+        added_names = extern_kernel_namespace.keys() - extern_kernel_state.keys()
+        for name in added_names:
+            del extern_kernel_namespace[name]
+        extern_kernel_namespace.update(extern_kernel_state)
+        _restore_torch_process_state(torch, process_state)
+    extern_kernel_keys_changed = loaded_extern_kernel_state.keys() != extern_kernel_state.keys()
+    extern_kernel_values_changed = not extern_kernel_keys_changed and any(
+        loaded_extern_kernel_state[name] is not value for name, value in extern_kernel_state.items()
+    )
+    extern_kernels_changed = extern_kernel_keys_changed or extern_kernel_values_changed
+    if loaded_state != process_state or extern_kernels_changed:
+        raise AssertionError("candidate module changed shared PyTorch or Inductor state while loading")
+    return module.call
+
+
 # assert_candidate_matches applies Tilesmith's shared numerical gate to one generated candidate.
 def assert_candidate_matches(
     torch,

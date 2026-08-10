@@ -27,6 +27,12 @@ class _ToolModel(FakeMessagesListChatModel):
 
     seen_tools: ClassVar[set[str]] = set()
 
+    # _get_ls_params makes the fake exercise Tilesmith's OpenAI harness profile.
+    def _get_ls_params(self, *args, **kwargs):
+        """Report the provider used by production CLIProxyAPI-backed models."""
+        params = super()._get_ls_params(*args, **kwargs)
+        return {**params, "ls_provider": "openai"}
+
     # bind_tools accepts the graph's built-in and Tilesmith tools without changing the script.
     def bind_tools(self, tools: Sequence[Any], **kwargs):
         for configured in tools:
@@ -166,6 +172,54 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIn("extern_kernels.mm", compiled.current_callable.source)
         self.assertIn(tilesmith.REFERENCE_START, compiled.current_callable.source)
 
+    # test_load_generated_rejects_shared_inductor_mutation covers candidate import isolation.
+    def test_load_generated_rejects_shared_inductor_mutation(self):
+        """Restore and reject additions, removals, and replacements in shared dispatch."""
+        original_bmm = object()
+        original_mm = object()
+        replacement_bmm = object()
+        torch_module = ModuleType("torch")
+        torch_module.__path__ = []
+        inductor_module = ModuleType("torch._inductor")
+        inductor_module.__path__ = []
+        codecache_module = ModuleType("torch._inductor.codecache")
+        select_algorithm_module = ModuleType("torch._inductor.select_algorithm")
+        extern_kernels = ModuleType("torch._inductor.select_algorithm.extern_kernels")
+        extern_kernels.bmm = original_bmm
+        extern_kernels.mm = original_mm
+        candidate_module = ModuleType("candidate")
+        candidate_module.call = Mock()
+
+        # load_by_key_path reproduces the trace's module-level dispatch overwrite.
+        def load_by_key_path(*_args, **_kwargs):
+            """Poison shared dispatch while loading a candidate module."""
+            extern_kernels.bmm = replacement_bmm
+            del extern_kernels.mm
+            extern_kernels.rogue = replacement_bmm
+            return candidate_module
+
+        codecache_module.PyCodeCache = Mock(load_by_key_path=load_by_key_path)
+        codecache_module.code_hash = Mock(return_value="source-hash")
+        select_algorithm_module.extern_kernels = extern_kernels
+        modules = {
+            "torch": torch_module,
+            "torch._inductor": inductor_module,
+            "torch._inductor.codecache": codecache_module,
+            "torch._inductor.select_algorithm": select_algorithm_module,
+        }
+
+        with (
+            patch.dict(sys.modules, modules),
+            patch("tilesmith.measurement._torch_process_state", return_value={"stable": True}),
+            patch("tilesmith.measurement._restore_torch_process_state"),
+            self.assertRaisesRegex(AssertionError, "shared PyTorch or Inductor state"),
+        ):
+            tilesmith._load_generated(Path("candidate.py"), {}, "source-hash")
+
+        self.assertIs(extern_kernels.bmm, original_bmm)
+        self.assertIs(extern_kernels.mm, original_mm)
+        self.assertFalse(hasattr(extern_kernels, "rogue"))
+
     # test_agency_controls_prompt_scope keeps the public policy explicit and rejects ambiguous levels.
     def test_agency_controls_prompt_scope(self):
         """Render each agency policy and reject unknown levels."""
@@ -182,6 +236,10 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIn("## Workspace contract", low_prompt)
         self.assertIn("only local file you may edit", low_prompt)
         self.assertIn("## Turn lifecycle", low_prompt)
+        self.assertIn("fastest accepted candidate", low_prompt)
+        self.assertIn("does not regress the complete compiled model", low_prompt)
+        self.assertIn("including extern_kernels", low_prompt)
+        self.assertNotIn("subagent", low_prompt.lower())
         self.assertIn("## GPU workspace (NVIDIA H100 (sm_90))", low_prompt)
         self.assertIn("persistent NVIDIA H100 (sm_90) ComputeSDK sandbox", low_prompt)
         self.assertIn("candidate.py` is the only remote file you may edit", low_prompt)
@@ -344,6 +402,7 @@ class TilesmithAgentTests(unittest.TestCase):
         blocked = track.benchmark("candidate-8")
         track.start_loop(1)
         cached = track.benchmark("candidate-7")
+        not_better = track.benchmark("candidate-07")
         second = track.benchmark("candidate-8")
 
         self.assertTrue(baseline["cached"])
@@ -357,6 +416,9 @@ class TilesmithAgentTests(unittest.TestCase):
         self.assertIn("already benchmarked", blocked["error"])
         self.assertTrue(cached["cached"])
         self.assertNotIn("caller_only", cached)
+        self.assertFalse(not_better["accepted"])
+        self.assertAlmostEqual(not_better["improvement_vs_best"], 0.0)
+        self.assertEqual(not_better["progress"]["status"], "needs_speedup")
         self.assertAlmostEqual(second["score"], 0.92)
         self.assertEqual(second["progress"]["percent"], 100)
         self.assertEqual(track.benchmarks, 2)
@@ -812,6 +874,7 @@ class TilesmithAgentTests(unittest.TestCase):
             <= _ToolModel.seen_tools
         )
         self.assertNotIn("execute", _ToolModel.seen_tools)
+        self.assertNotIn("task", _ToolModel.seen_tools)
 
     # test_model_call_limit_counts_provider_calls protects the public budget invariant.
     def test_model_call_limit_counts_provider_calls(self):
