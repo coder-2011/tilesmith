@@ -1,0 +1,427 @@
+{
+  "messages": [
+    {
+      "data": {
+        "additional_kwargs": {},
+        "content": "Optimization loop 1/1. Improve /attempts/attempt_02.py for NVIDIA L4 (sm_89). Explore with every available tool, then finish normally; the host will evaluate this file automatically.\nPrevious host evaluation: {\"accepted\": false, \"attempt_path\": \"/attempts/attempt_01.py\", \"benchmark_iterations\": 100, \"benchmark_samples\": 7, \"candidate_ms\": 5.593139038085938, \"candidate_samples_ms\": [5.764403076171875, 5.781524658203125, 5.643368530273437, 5.584629516601563, 5.589760131835938, 5.580697631835937, 5.593139038085938], \"chip\": \"NVIDIA L4 (sm_89)\", \"correct\": true, \"improvement_vs_baseline\": -0.006160818422900505, \"lower_is_better\": true, \"minimum_improvement\": 0.02, \"progress\": {\"loop\": 1, \"loops\": 1, \"percent\": 0.0, \"status\": \"needs_speedup\"}, \"reference\": \"torch_inductor_generated\", \"requested_chip\": \"NVIDIA L4 (sm_89)\", \"score\": 1.0061608184229005, \"source_sha256\": \"bc4197dc69f67fddf5a63eb95b282802575b97f7254e454bd6b3df536d704541\", \"torch_inductor_ms\": 5.613352661132812, \"torch_inductor_samples_ms\": [5.706392822265625, 5.609041748046875, 5.64203369140625, 5.622178955078125, 5.613352661132812, 5.546526489257812, 5.52964111328125], \"warmup\": 25}",
+        "id": "1d4331c7-4848-42da-935a-edfed175b7b9",
+        "name": null,
+        "response_metadata": {},
+        "type": "human"
+      },
+      "type": "human"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "content": [
+          {
+            "content": [],
+            "encrypted_content": "gAAAAABqeOKReKpCF92d0KbT0-nRTKLy-kqoChQpzdB7xBmrMupl1-XQBK6ZiykN5ACYqgFbOcozYqmCrzYqPqp26i9b7_FPV1AD_4LD6ajuHMmwFnTyq7fI7BPkzb0V8RpFl9cmr8m0klJmGtbATq1xS10-wQZOmmdZJPSkbFakqG304gCWBdiMdvy8V3eI_eYgUc6URCadHfcaWN5-WaslvCgz4oXlkCqVfLCHv1HSQhDElwJSDzbvDk0apP3dcE0TQEOHOgz2aTZrDOLUhmgkUTBNuncWeg1dhcgE-Fs5vyigVR-l85QiiErZpi0tQs6FpDelEFYwzp31QV3n9YFK8vo_KGpXzG3gogMYu2Wh4JS-oLvfEOtsiXxyDX4b-jzhBq381_9vWJy_0PdPivwRbgAcXlAErIiHcA1-Vbk-1tl3UrMQlwDYDMAHZ1rLRmTgxS9GyZaAcHH4bsy7rBhcaNTKJLHKiq-OOKgkYnl5f9p_QQ0wvTSPAYGuFK7YTVDNs61xjZYfRaS7IBTowkuQtGqKZexQnf9-0Q6r4jISRfDBleUUb_LQ8nVBPbszjSirlnoqQSl--_NwAha_W89fJp0jFPkvB2yI8YbGypjXH6YClmaN8JkukSy-Cg5RxgvadwkUxkcvUw_6UC0wfOKStW1KGHri7wisjlH9Xo2x75KoI9eu6vaimc7AwcU2LiG_Gc806PDcx50ByPdMJxeo1fKDtSsoZrRxfHI3Icj-Bfxvc-zM9zu51u16jqToeGlvDgn-y1NL97qyz53NuVROi4TzVjqREE1FUhAjlcAj-wF3TLgJLeaOj7IhfY2gmiOnR1OUZ8eEkZThyEvnxJVNP0XwfVZqlxiWJueNbnBOCUfkl-0avVPJ3uTZ2BBQFoYtf7nK3sDJddB1hwtbLiDib7a-uhNMMZ55gap67EgB99J_DwzDmZ4iwB3hacTTEDFU3RWeibP524AFyi2KyQNDPymc4BACMOhXkZmHiPuiPOKjF4oYwNlEKRIvuTVEMnrNXX8o_xwxpK-2My9G6CRb_XKeKJP0Tpe0-J5STmuqeLlllQzm0uGbLu7nhfM8HRmuNJt3HvcGHxpTMq1_vOm0wk3HWO1EqFJtvuyoZX7bV0usuILJVgbJnPPY_RJAtviJcerpe3qUs-ufMFWJveuZZl_hIXpjXRXRRH_D8KIH6NQZVGQHhOpl2ntFzSOPeLNFwPYuyySgU62mHoulw2xEHHqqwHwR8rPYOX6rDQFRkHOKmQ3pIXHNgPw4GzKZT9_gtt0GXqC2IAwgo9lW3U0gANoHu1ZEAZ_ofCyv9W955WLQ6kkJnAOa585exAV4nozTIoFXaUOWSf9upIY3YqsbAqzZ1M0jzsRm4j1yPP2HGXVKkp5ZN_QvcWVG609n5PAsQh9N8Zm2SLjvpEY1dBwI8y8D8oA7R4UvfGdyVvFSHqs-6N5DIfQtJj5BbZzSa8k-6SOGRHZmp8s1Qi3xfBWWakg9xtuJp5irFOy6b1wSsddGwazuTrV-aNkmn5XN9ud9kfksaSrTAMUYNaj-ecCvzoBzpyLeQfDEDsAM5TqcOXkdp_UC-nltyilo49lFOpv-grJcyFKnQyiCm9lXNL4_Am1JyAhMflaMmaAB-3OBEEaleb92hQvNFPdfE_SqhzAZZVhC1cTaTWX6pR_setmkuogTUamhAuiJB0JlPYvRbPFx8G0izYxV64ZuQQRVL5vqwqoJl4wjKx8R_dWe0Grox1auMZI2XOYfZv68WJuPsIQbKko_dmilsLCWXwYFdtXIY80nlRotUYE_kzN-Oww2BBINKyvzCH8m6MQH4giTKhCc9wugxK8RRb2LLz50gmxpkFBq2BINjt9ceyQUgNWqAUSsdhIBtvSlLb21iC_p1nHdBjR8XXJfz2JQj7HigNt1RClqf3LIa-uCNSo3QDz_ltTzCwVvRzR1xbE_kAX1j36wREE_r3lq6pzMB8VpYcm25Z3JSGl43yR0ulqgC6KFaHTSTipRkWPEo68A2NTuClZRtcCn1ijDgWwJWFPxU5Mvz0BkTp8q9Lreo9aoZ62sxseIuRwzQSyIRV6TagelFI6jGe3HJXI1uIfiZe1Ko19CEhMlEFrlxz2V7eXnbgWbudp8Nryvm7g_A_PxT7U8sKs__4AyMVrz7XG2HYy4VpVNH__injEYLl4hqBstSj28MoNK-1es9aQBPl_plz8Z8Pe1fI5xniPSMaVZEUW0GAxH01ma2owHhTvq-bow-hyffdGe_XyGrAz2gd033aW6K44gjShO6vVpkFMqhhz_DqaF9Yw0FcfbQYrHd1SUSYxQgPz41KsSyIy2BiY7alWqbaMGuF69sJV-ORTbj9mGzPCDkSc1syCIMKJvJGisWW9gM1JYjRe8NnvrXPOoGo5jUWZKkOzWRBZb9Lz6g3wO7ksRXlTLQ_wrtQVQJujouKqiJf-kvfgOaVVxKzhpZDsxuZDL7xOsfNK4BmOO3OXCPuDWZE6CjoRlfwkyn95sbDcQjSAXuXJZR0c0TNEfRR3-kbpGYhx26Gtc5CDqfshkGW0uTMhDJofGzPkHn-QT5-iZPDkM_GCTTaUi2uR4SkeUzI-XRXICY-6GBA9CN7dtkHPKejUU7fMeUVzYxblgxpySYPISk5avdk1Ie6ZkSxLiW79qJKJB1vXCB_zcMZISciP6VHwG_tqnT1Cf8Yfi9KjGZ5GXFiVIfPC1Hsr7Lz64TOQvDQy35c6YhK2FPKBOpyzuohADrVKyBuc34yD2UnQZD1lb7ga9Vn6Ihl6LXjEVKhWuAfn5HgyLcxVusQuw3yDB0QPSUxhqEKNIxdK2zDKFqfGPQGM3r2QGISUiCVjFSLETOzRwPHT21ull7AN1YSZCFys9tihYIeS2t4JXTQkBPiWwXWc2XDn2OM5cR2vcZyBA7LYhTgot5DR0jF3wqHimZ5UnSD8ciS6Kafa7ImTmKCJ2Rb6xmJ9ch-B9lmd3cZPjyoTA2mUY5TyUxTSolWC8xIIRr68USgg7RBJnlEu-zYmesh-E8ohBHMadnYKhE64l8eR6U5_I5JNXPbDO91CQyFnkCsTtn7EG59cqUKHPwsosCETOx06Vgai59IQqUHAK6eJjoFY-qOWJLQE840bdf3dk2KfkiTvCSwHQymqETyAwBAdT5r0-bMG1IgUtyzFCqHVrKABBBjvsbTRKEYTkq5pq_JywZIJPngDt6XSYYN4ZgM9_dHOrYrFBjBSle2JFGlyC__ncaX3vBrjkHAmZtbl3DgnnoVT4UgfqV2O8gBEdtuQIncyjk-F8nII68udUvn-uMHbjznMwez0JZeTAeNbKdhBPh7WBkYMmBehZ5KPLSzYkQ03ZXsD7VAPGlOrzU0QOMPRBQWcSWfnOMf-kwG3thJuOiyzlpchiX-D66bzi9OJqxHnuB0u1c_s5yHEqnk772BYP4b84xyFFSZCZgvMLvu5OBPuUZWrH4s51E8XJK7kCsguc1q2xjiiRDhlyBrR9GKT6w6k8R5B02YjYabIxQLgH",
+            "id": "rs_04dc1c8903820aeb016a78e28674f881959e147b3cc7c234f9",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"todos\":[{\"content\":\"Inspect active attempt_02 and prior results\",\"status\":\"in_progress\"},{\"content\":\"Find a safe launch or work reduction with better odds\",\"status\":\"pending\"},{\"content\":\"Patch only /attempts/attempt_02.py\",\"status\":\"pending\"},{\"content\":\"Run syntax/static checks\",\"status\":\"pending\"}]}",
+            "call_id": "call_Au7JmPbq5YIZHuVNqQh9Jvff",
+            "id": "fc_04dc1c8903820aeb016a78e29103348195bc0a6331614164f3",
+            "name": "write_todos",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
+        "id": "resp_04dc1c8903820aeb016a78e28520e081959775a51687cbb575",
+        "invalid_tool_calls": [],
+        "name": "tilesmith-kernel-optimizer",
+        "response_metadata": {
+          "created_at": 1786307205.0,
+          "id": "resp_04dc1c8903820aeb016a78e28520e081959775a51687cbb575",
+          "metadata": {},
+          "model": "gpt-5.5",
+          "model_name": "gpt-5.5",
+          "model_provider": "openai",
+          "object": "response",
+          "service_tier": "default",
+          "status": "completed"
+        },
+        "tool_calls": [
+          {
+            "args": {
+              "todos": [
+                {
+                  "content": "Inspect active attempt_02 and prior results",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "Find a safe launch or work reduction with better odds",
+                  "status": "pending"
+                },
+                {
+                  "content": "Patch only /attempts/attempt_02.py",
+                  "status": "pending"
+                },
+                {
+                  "content": "Run syntax/static checks",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "call_Au7JmPbq5YIZHuVNqQh9Jvff",
+            "name": "write_todos",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": {
+          "input_token_details": {
+            "cache_creation": 0,
+            "cache_read": 29056
+          },
+          "input_tokens": 113416,
+          "output_token_details": {
+            "reasoning": 516
+          },
+          "output_tokens": 598,
+          "total_tokens": 114014
+        }
+      },
+      "type": "ai"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "artifact": null,
+        "content": "Updated todo list to [{'content': 'Inspect active attempt_02 and prior results', 'status': 'in_progress'}, {'content': 'Find a safe launch or work reduction with better odds', 'status': 'pending'}, {'content': 'Patch only /attempts/attempt_02.py', 'status': 'pending'}, {'content': 'Run syntax/static checks', 'status': 'pending'}]",
+        "id": "2ccaf9ab-a9fb-4d51-91ff-89f888c8ee62",
+        "name": "write_todos",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "call_Au7JmPbq5YIZHuVNqQh9Jvff",
+        "type": "tool"
+      },
+      "type": "tool"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "content": [
+          {
+            "arguments": "{\"path\":\"/profiles\"}",
+            "call_id": "call_jXNBu42q9EXdd6vy4L7QsR7v",
+            "id": "fc_04dc1c8903820aeb016a78e296331c819596909fbea7582e11",
+            "name": "ls",
+            "status": "completed",
+            "type": "function_call"
+          },
+          {
+            "arguments": "{\"pattern\":\"triton_poi_fused_all_queries\",\"path\":\"/attempts\",\"glob\":\"attempt_02.py\",\"output_mode\":\"content\",\"max_count\":5}",
+            "call_id": "call_ZDl1GTor5QKUs6cbxA2mEOWm",
+            "id": "fc_04dc1c8903820aeb016a78e296333081958ff634ac527eb838",
+            "name": "grep",
+            "status": "completed",
+            "type": "function_call"
+          },
+          {
+            "arguments": "{\"file_path\":\"/attempts/attempt_02.py\",\"offset\":2088,\"limit\":25}",
+            "call_id": "call_sdzRM6VQ8Q1C8tjIzexWFuGc",
+            "id": "fc_04dc1c8903820aeb016a78e29633388195aed98ab9b3c29e6f",
+            "name": "read_file",
+            "status": "completed",
+            "type": "function_call"
+          },
+          {
+            "arguments": "{\"file_path\":\"/attempts/attempt_02.py\",\"offset\":14180,\"limit\":80}",
+            "call_id": "call_xuu3Ts2JPG6XRh2EvPtQwmJp",
+            "id": "fc_04dc1c8903820aeb016a78e2963344819584140f43cbfc4c7f",
+            "name": "read_file",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
+        "id": "resp_04dc1c8903820aeb016a78e292efc08195a95334e0665b48cd",
+        "invalid_tool_calls": [],
+        "name": "tilesmith-kernel-optimizer",
+        "response_metadata": {
+          "created_at": 1786307219.0,
+          "id": "resp_04dc1c8903820aeb016a78e292efc08195a95334e0665b48cd",
+          "metadata": {},
+          "model": "gpt-5.5",
+          "model_name": "gpt-5.5",
+          "model_provider": "openai",
+          "object": "response",
+          "service_tier": "default",
+          "status": "completed"
+        },
+        "tool_calls": [
+          {
+            "args": {
+              "path": "/profiles"
+            },
+            "id": "call_jXNBu42q9EXdd6vy4L7QsR7v",
+            "name": "ls",
+            "type": "tool_call"
+          },
+          {
+            "args": {
+              "glob": "attempt_02.py",
+              "max_count": 5,
+              "output_mode": "content",
+              "path": "/attempts",
+              "pattern": "triton_poi_fused_all_queries"
+            },
+            "id": "call_ZDl1GTor5QKUs6cbxA2mEOWm",
+            "name": "grep",
+            "type": "tool_call"
+          },
+          {
+            "args": {
+              "file_path": "/attempts/attempt_02.py",
+              "limit": 25,
+              "offset": 2088
+            },
+            "id": "call_sdzRM6VQ8Q1C8tjIzexWFuGc",
+            "name": "read_file",
+            "type": "tool_call"
+          },
+          {
+            "args": {
+              "file_path": "/attempts/attempt_02.py",
+              "limit": 80,
+              "offset": 14180
+            },
+            "id": "call_xuu3Ts2JPG6XRh2EvPtQwmJp",
+            "name": "read_file",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": {
+          "input_token_details": {
+            "cache_creation": 0,
+            "cache_read": 113024
+          },
+          "input_tokens": 114108,
+          "output_token_details": {
+            "reasoning": 0
+          },
+          "output_tokens": 141,
+          "total_tokens": 114249
+        }
+      },
+      "type": "ai"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "artifact": null,
+        "content": "['/profiles/baseline.json', '/profiles/trace_00.json']",
+        "id": "18343a34-984f-4a3b-b3cf-57a165c69591",
+        "name": "ls",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "call_jXNBu42q9EXdd6vy4L7QsR7v",
+        "type": "tool"
+      },
+      "type": "tool"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "artifact": null,
+        "content": "No matches found",
+        "id": "b3f0bbcc-7503-46d8-8f7f-a85f02a397a8",
+        "name": "grep",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "call_ZDl1GTor5QKUs6cbxA2mEOWm",
+        "type": "tool"
+      },
+      "type": "tool"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "artifact": null,
+        "content": "2089  def triton_per_fused_clone_exp_expand_mul_new_zeros_select_sum_unsqueeze_view_0(in_ptr0, in_ptr1, out_ptr0, xnumel, r0_numel, XBLOCK : tl.constexpr):\n2090      xnumel = 512\n2091      r0_numel = 64\n2092      R0_BLOCK: tl.constexpr = 64\n2093      rnumel = r0_numel\n2094      RBLOCK: tl.constexpr = R0_BLOCK\n2095      xoffset = tl.program_id(0) * XBLOCK\n2096      xindex = xoffset + tl.arange(0, XBLOCK)[:, None]\n2097      xmask = xindex < xnumel\n2098      r0_index = tl.arange(0, R0_BLOCK)[None, :]\n2099      r0_offset = 0\n2100      r0_mask = tl.full([R0_BLOCK], True, tl.int1)[None, :]\n2101      roffset = r0_offset\n2102      rindex = r0_index\n2103      x4 = xindex\n2104      tmp0 = tl.full([XBLOCK, 1], 0.0, tl.float32)\n2105      tl.store(out_ptr0 + (x4), tmp0, xmask)\n2106  ''', device_str='cuda')\n2107  \n2108  \n2109  # kernel path: /tmp/torchinductor_root/bi/cbitpxhfzx2ymptmzxr3y34jsfffioa7b3vliooyqmcigrdqp573.py\n2110  # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step, einsum_1], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n2111  # Source node to ATen node mapping:\n2112  #   einsum_1 => clone_2, unsqueeze_7\n2113  #   query => mul\n\n[Read 25 lines (lines 2089-2113 of 15076 total). 12963 lines remaining from offset 2113.]",
+        "id": "5fdf888e-491a-4bc0-99af-dc1605119b22",
+        "name": "read_file",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "call_sdzRM6VQ8Q1C8tjIzexWFuGc",
+        "type": "tool"
+      },
+      "type": "tool"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "artifact": null,
+        "content": "14181              arg2_1 = copy_if_misaligned(arg2_1)\n14182              arg3_1 = copy_if_misaligned(arg3_1)\n14183              buf0 = empty_strided_cuda((2, 4, 64), (256, 64, 1), torch.float32)\n14184              # Topologically Sorted Source Nodes: [key, key_step, getitem_6, new_zeros, gate_step, getitem_5, exp, state_1, mul_2, prediction], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.select, aten.new_zeros, aten.exp, aten.mul, aten.sum]\n14185              raw_stream0 = get_raw_stream(0)\n14186              triton_per_fused_clone_exp_expand_mul_new_zeros_select_sum_unsqueeze_view_0.run(arg2_1, arg3_1, buf0, 512, 64, stream=raw_stream0)\n14187              assert_size_stride(arg1_1, (2, 64, 2, 64), (8192, 128, 64, 1), 'input')\n14188              arg1_1 = copy_if_misaligned(arg1_1)\n14189              buf2 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14190              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step, einsum_1], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14191              raw_stream0 = get_raw_stream(0)\n14192              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_1.run(arg1_1, buf2, 512, stream=raw_stream0)\n14193              buf6 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14194              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_1, einsum_3], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14195              raw_stream0 = get_raw_stream(0)\n14196              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_2.run(arg1_1, buf6, 512, stream=raw_stream0)\n14197              buf10 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14198              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_2, einsum_5], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14199              raw_stream0 = get_raw_stream(0)\n14200              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_3.run(arg1_1, buf10, 512, stream=raw_stream0)\n14201              buf14 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14202              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_3, einsum_7], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14203              raw_stream0 = get_raw_stream(0)\n14204              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_4.run(arg1_1, buf14, 512, stream=raw_stream0)\n14205              buf18 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14206              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_4, einsum_9], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14207              raw_stream0 = get_raw_stream(0)\n14208              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_5.run(arg1_1, buf18, 512, stream=raw_stream0)\n14209              buf99 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14210              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_23, einsum_47], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14211              raw_stream0 = get_raw_stream(0)\n14212              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_6.run(arg1_1, buf99, 512, stream=raw_stream0)\n14213              buf103 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14214              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_24, einsum_49], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14215              raw_stream0 = get_raw_stream(0)\n14216              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_7.run(arg1_1, buf103, 512, stream=raw_stream0)\n14217              buf108 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14218              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_25, einsum_51], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14219              raw_stream0 = get_raw_stream(0)\n14220              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_8.run(arg1_1, buf108, 512, stream=raw_stream0)\n14221              buf112 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14222              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_26, einsum_53], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14223              raw_stream0 = get_raw_stream(0)\n14224              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_9.run(arg1_1, buf112, 512, stream=raw_stream0)\n14225              buf116 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14226              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_27, einsum_55], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14227              raw_stream0 = get_raw_stream(0)\n14228              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_10.run(arg1_1, buf116, 512, stream=raw_stream0)\n14229              buf120 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14230              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_28, einsum_57], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14231              raw_stream0 = get_raw_stream(0)\n14232              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_11.run(arg1_1, buf120, 512, stream=raw_stream0)\n14233              buf125 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14234              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_29, einsum_59], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14235              raw_stream0 = get_raw_stream(0)\n14236              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_12.run(arg1_1, buf125, 512, stream=raw_stream0)\n14237              buf129 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14238              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_30, einsum_61], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14239              raw_stream0 = get_raw_stream(0)\n14240              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_13.run(arg1_1, buf129, 512, stream=raw_stream0)\n14241              buf133 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14242              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_31, einsum_63], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14243              raw_stream0 = get_raw_stream(0)\n14244              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_14.run(arg1_1, buf133, 512, stream=raw_stream0)\n14245              buf137 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14246              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_32, einsum_65], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14247              raw_stream0 = get_raw_stream(0)\n14248              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_15.run(arg1_1, buf137, 512, stream=raw_stream0)\n14249              buf142 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14250              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_33, einsum_67], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14251              raw_stream0 = get_raw_stream(0)\n14252              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_16.run(arg1_1, buf142, 512, stream=raw_stream0)\n14253              buf146 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14254              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_34, einsum_69], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14255              raw_stream0 = get_raw_stream(0)\n14256              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_17.run(arg1_1, buf146, 512, stream=raw_stream0)\n14257              buf150 = empty_strided_cuda((2, 4, 64, 1), (256, 64, 1, 1), torch.float32)\n14258              # Topologically Sorted Source Nodes: [repeat_interleave, query, query_step_35, einsum_71], Original ATen: [aten.unsqueeze, aten.expand, aten.clone, aten.view, aten.mul, aten.select]\n14259              raw_stream0 = get_raw_stream(0)\n14260              triton_poi_fused_clone_expand_mul_select_unsqueeze_view_18.run(arg1_1, buf150, 512, stream=raw_stream0)\n\n[Read 80 lines (lines 14181-14260 of 15076 total). 816 lines remaining from offset 14260.]",
+        "id": "90c8406b-5cee-4c5b-aae7-8e5d7acf109a",
+        "name": "read_file",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "call_xuu3Ts2JPG6XRh2EvPtQwmJp",
+        "type": "tool"
+      },
+      "type": "tool"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "content": [
+          {
+            "content": [],
+            "encrypted_content": "gAAAAABqeOKae2LGXBrYLK59zY7cZPF9uJoSpQwQyUONKKI8KNwawoFXBj-XnsTn8YW9bsZS2-GljEhscDwRoZLdHsz2Oa32-JqqXqIuSslQOKh_1IbJKeuP7zbBd-WazEqGuMWcMAIMg83s4kthi4NStyT1WpA9vOzhcPjh7e8WejbzN0wL7bcHr5_PwMfaEyLwUVYDUp7Ff67U_6Bl2CTXTSlgRqA6hI8jXwK6E-xhTwSNKnXVneSxzkCQcPH7sxNOZ8bk1N5XklcaDk4aaLKJRgSyuHcyKbdI2Rt7WTRByAp0Q_jBaRkWZXCDOry5o63wsUEyW9ThKZaEga6MC2qKebOX3amwcbO84k01kC7dMfsxLgj1qLI3VMMHEzrbd9GkFXLXOO7DVO39y92QvRZA5oWCngBmCjZ3llYVMekASax0jcQsSXa0CZgaldOfRtQBQhTEPI5KPVab-mWpjV3cn7tV_BBjGFJFDcw3vILDRzKjFiOI3ZIM7WSzrdpjv4hatJ_5GgROmskQE7AaPkPPnttacAeCAzN-CufAfjm0_NGn5iVKb_dFuZBizVEF72aR3rRO7EP8-KVd6RlkLGd_7VTmufscwKEmK48hl3VBWlFKX-6G3nyH9ZI2c5YZKiGyvYiGbRUH44bmX1wxd7u7Msgn524AHLMuYLAH2qp6tANCzQ02DyRRZl6e2pyHyszbzlWorYfdbBXM6cRVYsGCBXVI-YIZALb6SmxmtcnFFgUrbbDceeHT8sDzgikh0qlIzIrxL0YNhV8NftCNcCN2_X8eA2o8iKEN7022sft8HEw-N_u_btXAHB_Ja3tOCwvzT3PFovrrB2qZg9fl1LWHM6v4BBaQa3rpiPzEzwXvqHBZ-8m2vCqTSoTiKusvYgFYXzW0nSnUZyl9dL9zP6QfT6CcgXyELUr_cmAqfqEEXVpPV_DqhTMUx3W8liAyi6OiLl_xmflkCD-4cZB1_Eme5Xd4hkAzk4cgvwEHfBB_bDh9wcmXcY5AJc5VDJTR0sCyegBLvdXUO7gMphzQcJFWNnUNBMU0ffWhuodqh9Ond8dgqO8D4MzoI80vu----pYhl8fOFdnHt_t67RhPucTLezQUxtXUrIy5V9SG7KrSvLF9EjXjeth7-9z4rgy2cYPCapGAEQD7I686Z57IYVftswM7YInMxw==",
+            "id": "rs_04dc1c8903820aeb016a78e299753881958e042f29805e5ba5",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"file_path\":\"/profiles/trace_00.json\",\"offset\":0,\"limit\":120}",
+            "call_id": "call_lxgR0aFvutrzwu0WrcTlkYuB",
+            "id": "fc_04dc1c8903820aeb016a78e29a64e08195b7591868caaec294",
+            "name": "read_file",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
+        "id": "resp_04dc1c8903820aeb016a78e2980dac8195b67a44824f6138e2",
+        "invalid_tool_calls": [],
+        "name": "tilesmith-kernel-optimizer",
+        "response_metadata": {
+          "created_at": 1786307224.0,
+          "id": "resp_04dc1c8903820aeb016a78e2980dac8195b67a44824f6138e2",
+          "metadata": {},
+          "model": "gpt-5.5",
+          "model_name": "gpt-5.5",
+          "model_provider": "openai",
+          "object": "response",
+          "service_tier": "default",
+          "status": "completed"
+        },
+        "tool_calls": [
+          {
+            "args": {
+              "file_path": "/profiles/trace_00.json",
+              "limit": 120,
+              "offset": 0
+            },
+            "id": "call_lxgR0aFvutrzwu0WrcTlkYuB",
+            "name": "read_file",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": {
+          "input_token_details": {
+            "cache_creation": 0,
+            "cache_read": 114048
+          },
+          "input_tokens": 117529,
+          "output_token_details": {
+            "reasoning": 41
+          },
+          "output_tokens": 76,
+          "total_tokens": 117605
+        }
+      },
+      "type": "ai"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "artifact": null,
+        "content": "  1  {\n  2    \"messages\": [\n  3      {\n  4        \"data\": {\n  5          \"additional_kwargs\": {},\n  6          \"content\": \"Optimization loop 1/1. Improve /attempts/attempt_01.py for NVIDIA L4 (sm_89). Explore with every available tool, then finish normally; the host will evaluate this file automatically.\",\n  7          \"id\": \"e09cff23-30bb-42b3-a0fe-5cbd89ec8d01\",\n  8          \"name\": null,\n  9          \"response_metadata\": {},\n 10          \"type\": \"human\"\n 11        },\n 12        \"type\": \"human\"\n 13      },\n 14      {\n 15        \"data\": {\n 16          \"additional_kwargs\": {},\n 17          \"content\": [\n 18            {\n 19              \"arguments\": \"{\\\"todos\\\":[{\\\"content\\\":\\\"Inspect profiles and active attempt structure/dataflow\\\",\\\"status\\\":\\\"in_progress\\\"},{\\\"content\\\":\\\"Identify bottleneck and safe optimization candidate\\\",\\\"status\\\":\\\"pending\\\"},{\\\"content\\\":\\\"Edit /attempts/attempt_01.py only\\\",\\\"status\\\":\\\"pending\\\"},{\\\"content\\\":\\\"Validate syntax/basic consistency\\\",\\\"status\\\":\\\"pending\\\"}]}\",\n 20              \"call_id\": \"call_uSxhDlScXxtAnvYJ6CSs31MO\",\n 21              \"id\": \"fc_04dc1c8903820aeb016a78e1b52c188195a391d50b8b418122\",\n 22              \"name\": \"write_todos\",\n 23              \"status\": \"completed\",\n 24              \"type\": \"function_call\"\n 25            }\n 26          ],\n 27          \"id\": \"resp_04dc1c8903820aeb016a78e1b3f380819597952e3de9ae9002\",\n 28          \"invalid_tool_calls\": [],\n 29          \"name\": \"tilesmith-kernel-optimizer\",\n 30          \"response_metadata\": {\n 31            \"created_at\": 1786306996.0,\n 32            \"id\": \"resp_04dc1c8903820aeb016a78e1b3f380819597952e3de9ae9002\",\n 33            \"metadata\": {},\n 34            \"model\": \"gpt-5.5\",\n 35            \"model_name\": \"gpt-5.5\",\n 36            \"model_provider\": \"openai\",\n 37            \"object\": \"response\",\n 38            \"service_tier\": \"default\",\n 39            \"status\": \"completed\"\n 40          },\n 41          \"tool_calls\": [\n 42            {\n 43              \"args\": {\n 44                \"todos\": [\n 45                  {\n 46                    \"content\": \"Inspect profiles and active attempt structure/dataflow\",\n 47                    \"status\": \"in_progress\"\n 48                  },\n 49                  {\n 50                    \"content\": \"Identify bottleneck and safe optimization candidate\",\n 51                    \"status\": \"pending\"\n 52                  },\n 53                  {\n 54                    \"content\": \"Edit /attempts/attempt_01.py only\",\n 55                    \"status\": \"pending\"\n 56                  },\n 57                  {\n 58                    \"content\": \"Validate syntax/basic consistency\",\n 59                    \"status\": \"pending\"\n 60                  }\n 61                ]\n 62              },\n 63              \"id\": \"call_uSxhDlScXxtAnvYJ6CSs31MO\",\n 64              \"name\": \"write_todos\",\n 65              \"type\": \"tool_call\"\n 66            }\n 67          ],\n 68          \"type\": \"ai\",\n 69          \"usage_metadata\": {\n 70            \"input_token_details\": {\n 71              \"cache_creation\": 0,\n 72              \"cache_read\": 29056\n 73            },\n 74            \"input_tokens\": 29658,\n 75            \"output_token_details\": {\n 76              \"reasoning\": 0\n 77            },\n 78            \"output_tokens\": 77,\n 79            \"total_tokens\": 29735\n 80          }\n 81        },\n 82        \"type\": \"ai\"\n 83      },\n 84      {\n 85        \"data\": {\n 86          \"additional_kwargs\": {},\n 87          \"artifact\": null,\n 88          \"content\": \"Updated todo list to [{'content': 'Inspect profiles and active attempt structure/dataflow', 'status': 'in_progress'}, {'content': 'Identify bottleneck and safe optimization candidate', 'status': 'pending'}, {'content': 'Edit /attempts/attempt_01.py only', 'status': 'pending'}, {'content': 'Validate syntax/basic consistency', 'status': 'pending'}]\",\n 89          \"id\": \"906b2cab-9ba3-44c3-8275-17a918d6164c\",\n 90          \"name\": \"write_todos\",\n 91          \"response_metadata\": {},\n 92          \"status\": \"success\",\n 93          \"tool_call_id\": \"call_uSxhDlScXxtAnvYJ6CSs31MO\",\n 94          \"type\": \"tool\"\n 95        },\n 96        \"type\": \"tool\"\n 97      },\n 98      {\n 99        \"data\": {\n100          \"additional_kwargs\": {},\n101          \"content\": [\n102            {\n103              \"arguments\": \"{\\\"path\\\":\\\"/attempts\\\"}\",\n104              \"call_id\": \"call_nn8sQwEl1r3QRU89aFmXthqt\",\n105              \"id\": \"fc_04dc1c8903820aeb016a78e1ba0964819595241b23127a5be7\",\n106              \"name\": \"ls\",\n107              \"status\": \"completed\",\n108              \"type\": \"function_call\"\n109            },\n110            {\n111              \"arguments\": \"{\\\"path\\\":\\\"/profiles\\\"}\",\n112              \"call_id\": \"call_16jbH7bcshDs7MSSNhSfjkYv\",\n113              \"id\": \"fc_04dc1c8903820aeb016a78e1ba09788195827d86781bd8489b\",\n114              \"name\": \"ls\",\n115              \"status\": \"completed\",\n116              \"type\": \"function_call\"\n117            },\n118            {\n119              \"arguments\": \"{\\\"pattern\\\":\\\"def call\\\",\\\"path\\\":\\\"/attempts\\\",\\\"glob\\\":\\\"attempt_01.py\\\",\\\"output_mode\\\":\\\"content\\\",\\\"max_count\\\":10}\",\n120              \"call_id\": \"call_IOlTVJu78s6IyfhZT2JLh3Ov\",\n\n[Read 120 lines (lines 1-120 of 1772 total). 1652 lines remaining from offset 120.]",
+        "id": "7e89e74d-706b-4a71-997c-0366315db586",
+        "name": "read_file",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "call_lxgR0aFvutrzwu0WrcTlkYuB",
+        "type": "tool"
+      },
+      "type": "tool"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "content": [
+          {
+            "content": [],
+            "encrypted_content": "gAAAAABqeOLMff7O_G3KWpbDh_99UZcI73fV_Nyv7mXCc_gor6wcOXiYp-myPaI3bsJsdaQAYDUE2o72mQoPJ5fT-9TYDXVAYvIbRS-qmiHoUEY66m-5i85C_W04sWhuxITOf7pwxECzhOKXIrVtIrI2fvOehOCuKnOU3GR-3AwaAA2oa9evM3jpKPfO4UBlplVKcYDkIibPEB25Ns3mGhDiMmxovWEF6mcmkwk8wsLGqR5CcJRhKE3a3nzmJD2hJsGBJdDrwSoriOoiK7AySU2xdt7T627k8-WUnpCtxQ7usiOBqReQY0dxMRLLZCExo9_gT9zK0jsMla_k7kP0crG6xGrYyFEPCISAzrgPly1eQVbK5I6cmferil9Vz-jR1J0KcPDVdie2YVqOBHPiyfdqyBYeZAFC8DxYo41tU12x6J3fd0blCbTh8a90YBZBXZREKsLS0_iXeuylsFFGksolnezboo9IEZzJJ021Bmo3eRhyl5nviDJij8iD9l6YRJWWGKZu9mVgUzliyt6uobHk2KR1uvflntcqFDLolG0QMqFa3M6xBWM4LEkiqjkfjAGJ9ARgmQgQmF3Kmqy5x3VmZtaJptPlMLWTUibD0NhMqsxMCeg78NSQZBiCPK1hXWHRERwCFEGqtRZIU2QrL_0Psd3Nn4jWkJIaThgSwwBid_Tc1I_6gmuuG6rXVMZeGfdjbZqcS2i93gRgcwsSWATGayFUloz7tTRT6ti67_0I78EgrllcKtWSauXQFuDV5ELkvPxO9eEVoq4gsgC5cRG7g2885_aCDUZifhzy7JQC6lg-mtWn5sKyPOmAauMlBsv_AcY1Ubde_V2RA-DYsl4T3PE14uRqW810AQ2RXjEmgJFHAhM_h1VRWNZr_jutC5zjuoSSba6-wi1lWHWscTqp-0LIPc_hGtYd3t_paseEI829J7k9_tPLddryqXGK4i06QOGKWKEM11iSCC5_aBKzDTjz1oAtLC8dUHPTq2SV5Sgl7IjgEslhVHM__TB7qGGP6OrI-zUpcOvZighXQ6wq8h97yOvtw79Nsa4xhgvabIjzWtR9TAHh1MjtSn6MfaFizRJKF9tYowUrtwWSI0szHOtYX-Kwbvi3-iEMReQYgWrvKUOew0rxc0Ed28VOUeyT7POYFDzsFJiC8sK0gdVyzxh58kvYkD4ZFdPtgXX_rms_fQH4w9-fdy92nB6bYwE6wDBaeNDlD2thVjOAjFnTuKt6npuLT9QHWbZTXT-TBDxBHseXKRWHXnl6zoCPgj4C_XTmLaN4HAZILgftCs7bax5z7x87ms8B4nFsWmXB1oRVv1q1fUvbHgjRTSSb_ARIXU8phZ3zFCq9hfkAYurpGUVhktaPIB9n1P8t9xel847MADCX8zs9VQ4TPYJCCkq-pDuuwY5-fQMRmToV8nxeDpOO-7uIEvHO2OAAgkfAvLZJPH6p-xVYFbWs7W8zm9MaxrQcaKqdox1s1SOhiJNTFV17Ff2lnPVyjfmrJAI1jeW5Gc7H7HGX331-lk9YurRK6XnBWHNB6Rl7gIopjG0g1Wb6VCe8GHP7aatYcO-gUXurRHRKyEN2l28URYyoERV9hdsAfCCrG0gaMoUyWY_VqC-Pk8m5GA56A7FH-QKmqy-1o70buwiJksvQTvwdqxgsGDEASm6RbnFnepKTu_xOf2hOML_RWV-ORQRwIqwD_xTSkGRwP-8mcml3U73jQ_tawT_5uM0i8VTNZp88sLiIEGPMIRpweniZRdwMItccj8pAB4TqSZcEXp99p6S0n2O4vlcDjREzlVBYv6-lAHxRiVhpRRww69Shiz2Ec0JuKMHL4cSq5jW0AXshEBw7VUGl_nb_uARjllNf2XrFEDFzziyZeqOfza-asQU34jQi34WAV2lZCaRnB9aap_yY3aoxec6ITinO2ZxM9GQGWbvf35UppH7sMs3nZj-B1EhFGZnmaNZ08qapixSU2dxiET8u5I4bZMwqTpBvbUijeK8mI2n08BsIi3MIF2yUGs2Q2iujSVk1LT1mpcv6_SmCeTfKPktSwsiebj12WcY7tamNxya1JJUnZbtGocid7RJC4Ke3BChrYZBQ5R8Gt3DJjmEKiGxR-QBChNS6LP3QxpqK3ZjZLdv3zCUngABgQiOsQ8CR5eR9VEJBKvv0WTbPW-KEK9x3SbLyROcN8FPutPgwEdIUKGheK57uottj6D2Lmh6Bn4xVkNO9lDfVmoJpeMrLhqqj9BCD4FOARes2oF5YPUVMMdcUhA_wj25CYXOTkxL79jigs-8heLu-QQt6jKY6Ot1oPMTqUUuzAJFU9jePpn55psK1P8yKDlV19GrleRO6n19g58p79Wx102t_wFsoLUDXPoOjS-H2w21lPWeqjeUC4nbtnEomby7XR2HqcMbYzxpNHlJ1TTtsBsQbijM-iYtwCdwdqdXmJVngFHRcLNt7EHIDfJoVV0pxkbKVOgMwgzG7_lY8eTXrXTIUYywzM0HjLC5fg27Ryij6YD5OaLM7a8Nuxc1abB9lmlqZzHt8lzBuyQvKEY_f0QfQW0Jzy30t4s7sf1HtCYoNKA0CdTS1DHXY6USLxvmIy_1OTCGECNy9POAZcxWPQETUyKrA9LimF9pfDrEtb7FCnlorYRTvnCn86RXmRvpsWocAQc4sqxvj9k41wY_C-u5lyy8FTFPQsvq-YypGZxlMleDGCS7lJIuTKlPomexTCVhWhdmfJLkzRGqTiEWmyHheLVtw3WTEH5w9JYN6DrURmA12WeQ0jDaDUdUbFACTJmyo5-9-YpXlVj8KkAqJ6x9MRsf7fOm4EyBJ1M91FDsKNF4Y_I23KMNFXRJJYuTeqpoK6JOy8DvIWFfleRofW3wCtq6DvAzIoiRXMxG4lqUpJgskIDkCSlhW9uOkFY3croh_mVdF1G-zrOVF_aBXk2BsYeifakc8Fr6bEtbgQ2dc4fYWW5ujSWCEtUVZwLXC3fSt0xg4slcVgbvR1he2-IpLojhKOTyAzOP7I1BRd5jiA3llglGeo3_KM8nYjAaQ_wrBO9nLdz8z5Rbd-Zja7tMBE8XqbC7vy_91bf1w0hPosj5dKkZnfD76W0JFim_875wMJCFyuEB91v6rRla6Zb5So6dlBBxQwCMnqrQmvsY21wrNwcEDVbZ0MNC1RWAg15Yr6Q3mY4ZoWcFVn2rsvFbcRAZumCq33krbfaN6rFSoHZOIaEDvy6091BkZHeK6CCH-_OaO5MWcfoIxPsc53Y2IMhUqhqqtq9aw8Jk4ja83IZ1pAKOQhHzOqmeQD5_zsgtpBjNzhSSafSqJK4ogmcb3hTrXqjC8OJvD4iT5Be4KqKtux_Zds5pO3F6KlAu4L5ramHdCBqfhXF7xeWjC4tpt78oWN894s8qjBi_P-SR2pTxoS1wH3iG1n9bTR4DTkssDrdIIdOftfLZoe9ZHh6E9CpV3tdKIaOtjFd-b85FKofMowlgFMvRDoRWfXTwzjd-pjmtYYn_493DicaEe-K97Cqp1tiTIMPepN3ORXFiOIj1R0dcROBdUS18oUf1bW8CKq-tD1yUZdfw7jnqBMERP9yBcGKFWjBvCYs1Z0cucDYOkQPKvxsFaSTz_0XjY455CV5h13qvUHw6GAfO5M7lw8QDeEQyOzbT-7hs4fLjXICO-7pn6iO7_97cszYnw9s6erXHVvf7rApTqZbmdEWcLk-B4Na--Sh8Bx7_R8SKcrpcUuoPD3SNrvBasnywHrx3YprSEXHNgNitBQ0XHm5HRs5yWgW_ARcCl4sYKicqui61rJi9_EzyjTYgLvlUGWjz4TVPVC1Wx99168ShtVCtym_Epbsf7aaolyE_90XLqu1mjtPD74d1-scoWpaQO8ruNcssDAYlMy2btSUPYHDM4tF5Z5APgd2pCKdq-hLq6VPRDfmka3U6DDpSeKeNxsBTwSMwiq_UEYd_DYb4UJaUuxSgXGN_OGPw8DMDtshi_tgEOZGsepgtXc5-9ymu29NUEKOflGIz5bnKH5S4d-9ExktancyhCI08naJmj4Um5SW4bm_IN15H9ygcVoKvlUfbjJvbISMNm9Wga4vx6EaG67nKmrT4nzDW3jAL0Hwaghx8DTJ5F47nMJ_MXQlTpn-fi_i5r01t_L_Lf8QNQm0Ph3TYTmLu4pYzq65mCOkdwjJgoFMsk0x5iwCkUKBQw3BRlpLGr9_gFZEREcuSl1NlCelqFwvSK2DyjYxsK4AJPYvmnwzBOiZWG2teRiQycA0AMzqUXvnWsy1wMRhNdVTea_Qa8RCsQgODzGO15NyNEfvodyd_6C18a3Q-QNaKxAbSq7-cfMVhg_jgoL1iHiKTIvVsRGXZvQ96Vm7546DUwfPuO9J_Zi66y3heboxaIYamDg5wfPZcoiE3gUSkg_pNHjC91Q1scy0bjt8FcESiRR-WvDYs92p1cqP75JoB0YQmdhMqwEdqUHdUky_8eKEpHic0oj0gloAEsY5M1rxruonYsDeolWkiG5Ujm90a5O-g5hYvSWHv4Q30WR64VYs_IS4KMYP7nJdJRZlfkP0P5spTm0h056tTW38KVSOvfCMZjQXWNQgG7w6KQpYqem9qlY46UyYZoNtF8TNbUKrqOSQLhGcdcJlnMCUp_PvFicH7gj8bWD7FiPhxBGMsRaRVW42U_sNo74BeMYHhPvrJ_dWMX0pvcGurK-NfPcrsvEPuOppHnyXV_kZ8BlOfJs2ipeYCkjZQKOe60L6SRHtBgmNBwwGS5zLQxLN5W3px5CSHcsZlMeUYNM_Jad4wU-VfVmwho_m-KiZW4-2kJ0NKhCgl8FeZmh87_08ZN8p3FTID0cjyGGv-KcTpcE2mJH-UhiN5E4cpR1rOckYzQcDDT_XLOZOX6HFw-1OwFD6ukZ0Ahe5Q-nU-DbKcvG659DkKrWuYPg7jXDWoDeE1_Ly3iDwmom7HCCsPZMxSTU_oPNi2bwmop5y3o6AuMEgx4LFKma-fAM0ehT-05sGOctlZtmMOAbbketif6ekWaNKz_k9o8sWVPYpd_9xLiigjzE5rcdA1Is5fQsTcmT2jqbpPYgQ36fEspTPRQMzNrfv_L6ciMUErFMibERw53idlJeaGMkA97Bn5noARQKYBUekF3QOmV8xKTNRpezj29LIzi2aD52mKLdf0DQ6We9KJcd6JRQPvyC8t47Y4QGgsH4gq-nzkO_q8lRBoG0rCktY2KuvZq4PxyBqguNH70yBlEdL0D-FLLTGM1NjDu4keVXfx4iCdcldTmJp27nk9O-2S2L5W55JiU31eayfWYzTY2qvq1Y3wgJamDgEp-Bn6ncu13NZ6joo6n8YESuz9ApKMpXTrkcDV4CyQ58VPGK0fL3MQdsN3MPuxBcUIQYK39-ZfpV7g91r7jYsVoACSpQhjK5kv4gVOLI4h-cyi3R7q-7wwiRCRtRsQqUHNG0AHJi4tib1dTRYpT8jWfsHKSZ0FZlfU6LMi2-LFefBkLzRwrJRGou0fLCZkOVoGmoCfZj9rTHKSMBNVeOHwOvqVgG1fsy6auHgT1GRA9mpfe1a5rb1d5sDt2E1e_c1ab1rMX8NVMgouExEp6nnnpbCXcgI22XA8IKW0dBEBJfL1eVtFUB9F_gpfUIOmmrZaGl92nVYisY9fh31fk2Z9RprnvETDNNP05zGQctVRCZFKru429OnhoAfQ8l3RK38lsUzwgCGcXJ-tQKxEjS-4LybWbniyilVuTLIwmZ_yNgaje3Pwz_KFmlI3kErtYicknp6vtHx9k_pOGMEgC9T-kL93ry2srxfJvRxq_g3eE8EGNa41_VodQ-Cpom6M_fIFMkOtDMIBZ-A9MaCuF_7NRazldHHRGrLRt4-rEHULmC61557AZlI0W9JiX3ZWaSA4La3nfJhHOqcTwxY3ysdRT8iCUdLyKOFrBk_457a8zj07Wr0-lPm7KwyOMBZ2rYnEIi28p98kn5riqdEuecnuhuPIzTMNaKS4_KvFSyv6GlwYcZTvEs8wudzZHZI93aBYumsCxb2ic7xAx2Co4yM_UOSdMtImqIFxGw1UlvqaJydR09RwvxSanjrXt-RcUvp6SmiCxdPEcoE3MpXbADZth7w_3kuVCDzmWZrRUylDGQCeFLmfcjCKcDZ53ojAArpI_LwqTRqfQAGf7jWYz_pOVmdLpw6sELwYx5Ol7_bpGe52GP9_5iwGyy7Uzi7kldB-vJIu_rNxZS-BLrMhiryiU1_ywSHfTyHVsR-nDqxpJDED8yKkR5gRtI6MFrJ03pMZEx3vE1LKeqCuF3Fbh1BoELyrojgjeQu2p4UQZImwbk4vJfpFoi6Gzxkh8Mu9fWCg4b6vzGSPiKl_E96ryW00jsyyGxy-fydbbfqKacG2B14MaqOX4BjU1d1gtKzjFEhQpUEl9loaXl0x2mQgWJKl6-TGPxhIfaX_u8dMnHnCJYedlb_5M8_HRphXMC3tUJF-cI8zqISJqw_lVk22L9Fy_qIvk6LkV387PxielQBDjhBKso9bWJjptW3ZNcivWwuQBm_-oujfnrdeicGLQ_xRvB9cy6a6-Z0ex-A--NVOFnZtqWReKVXoACq0Y2cWpXyPu4tSfK2syZpQX3Zyceb3L4Ym4TR2twx41A57POrt6oYD1sjMm2p-Fr2taWESxp8oC4JTM6gdvEFwPcr-CwTGrjqgbq7_WZ6N8NDiYQYnREbvxWSvP9iBCCGdragBLzFtKveVl9IfAVyME5y08NgRDJEzbQTcDsF6ba2wFpsYA6b9geZG7DXp9_x3djynop4yZiFQzS9WlThk28L7yh7Es-lGPPpoHddmFrjiyB5_ce_AWemLetPxEU5A11qyhi_WanMp23X7UYg0zt8RH6xERP1KzAEXr9iIfahBQ7IGvHNQLoR3-Y4RPed-Zwmo9A6rrGHlfhs7N2q5LxwPOMljzK2E7DS6bKpMY1Y5A4c9ujm986h2OjUldQgC1Yao2vWJtRSGfZQiwStME7xYV_HlrIqGXEUozqWFtLXHTuKbxygZHTGnj6EvhX9kd0HRGDCJ3UaLxtXe_2utjSrGU9ZcOBPR0f3LqKhopuv4yQN_Q09wJI7bU81xn2Ky8bWSts813Xt7FYiMeIDdAFK-z5rWozvPWCdvZDLxhCzxxh9fmMjDGZZSj6Myp-AhxV4eroqjcDx0qXCtDzqnBG0qz454KBcM6LyVbSEEiVOzrVy0UyeDfgspNOzImRohKWpLzrwxhs_ckL6RuR9zVGMUaG_5wroQP7tB1KpaZzaMImpAMX9nh8mpGU5BKjOfrvZiqLnmczACswrjPXjBY1SzSxQxjwikaEIKLhTXzBfBXf9VeBHietyK10lMDCjnvGAZTEC9FElQVl0FJXVneJbv6DHWs9NqZFOmloxGRcNr0BWGjLyGDJMW4cL_DoghnjiGf7MtCZc5z9LEUEgF-PtfB7K4HwMv1kee1-fJKHKlocqeoOyjIBt6IGE1jHj7yxprUn5toHtuo0WYWZoZ7339tb0McA9xCtaCQWqHDDsp_slYxP0oaY963KMv6kFYZzafHqrM0ca_acS2a-xVllMNFEGlOiyV2G0kAQM8chydjz3smXoWDzs9ZsSgU1qicS4FhEI36gxoyzHSFE-egXcmzpTwBZTNCKsp9bM4kX-ZD3uEHX3r8AGcWlHLdxtWcTn1h4OfB8lEW4HaWiszk7QHrBNS-ejQAJo5pT0q3ao47-3HNs-0nwMKXpI5yEjTWSbdve9ejpmtI-puobZPosm_Z6_4OoPnJImGPOl8YdX3jFOqiSujWv6RUMX_83FPEWeEX4gj5M5lVgSPoCeOrqCxVQeIAXQL60Q_hBpNISJAH2A_ExLRUdPfBzyHHlyWZpZukt71hsV1AO8qQlZDRg1ynEV4JLQUiFnHTuolDB6rSObRsljgR1ytlmYr_kyEIzoPOqGvtiYbRbuJ8hddGPEuOHpY4b2lYBPQxYHa8bstxm0qtPusYclQKCC83Y4shQjOWsj2rOo1NenNVhfe3W0dsVTm35gMVnDSIN93_gpR-4aNnIcVG7b7ynJcV-hkzkHzzV_5mHPpa58SpMo29eBUjy6O3kjJ6oriuVT87nVsNZxwHkWONHILRlWxK3nR4oFhUHv0dSYWgcy1ToOtpStsLEGmsxVJiU6irSC8DXIKXSE3PQDzfLw2TsduHy92fuYSADetM44w_WZRtwyIBhH_KFW3dxq1zVyNdcsIyk9ERoHzglMJBzJ1orwUkze-Vkw5lzm6ffCMOoe80uzWO6AfPZEpyZm1jiHQKQtUz7gPJuzsqFjvfsvLU6KzmTSLS9y6Gi-lI_an0BaSxLlcV5N9xDYLN438oFZcwupsnNP-92Cmq2UM52lzGZM4mDiwLFlfnLqCS0vCSZ3cETpl36DG4COn-JWqo_4ncPDrlqkbLhFkGXdNltQUF48-X0eeQ-xqIY7FfBQLBF-CycofomPW7OdvSErxKare88zJBp0S9URayYIKQxu4yi7KsZnrT8IoH0ymggwguUC-ICxdvW3AEYk--a9gWsm2qIYOsBEAPwK3i8Q1SvT5crvpQaVjKBuvGTZHftkkddu4UqhbtUOM8wEaYoDUZn_gcnnlA_P9kwI2TZRmmaSB-KRKH5aMF5p3sYCWdD6b8IURHCYhFrKEvWgFbZl0vKFTFibYD75dkod2IduieMucQiMDnTDD_VShvQ-RPlsK62gn2b4ULTSATKmTt0T9Leui1ISXxBU9ZtPnEimceVbV4pILkgWdtS6dTMgLEMD3dYLHHyH8kq5c4AoCmamTYFpYadCdHWT1I1bVqhAseDsVZEr-8LUoMKbk4dttAAVnNDlHGfnfuXGx0G9KP0zT2TEHi7K3Vo64x1M6dLDF3u6BBSkGAZaLJN8DwRqOwp5brQ3Lc0p6gH_MZovpwW97em5LO8D58PenuYH7NFvPicLi-wmwIVca9WRjmScPawdIJ7YS1kvwutvfW0ClQ0Oiqu409eg5MngU45AOeaE5KQQ6r4B-02YwmavS4BCDXJmHh9ternuR0YpLhL-LZ0o6ScXvI-5_Mv1nRV7CmcqwXg3esN8pjDC8rjoqKGu4pXS1DuKZBcyTGxkLTtf2S9W1oz2f9x_NXJs3VUkNp6pFtBYANf0O4w3XX73-TWVejyj3jIU4wWd98TeW81wI8AHO05pw5u7elEhSOwYdtjCt7YUediG5I3o_dqJ6JfmLb4bQQfBXkG0-OSlDDHZ6zzUWXMPCePYiUW2zB4jPl9u9B3P_5-KQFk_I099gq4CRaDddqgyK94Bby5DNTB0cMGEmvnBiQIvN9rXDFUwhXK7ZGSFGdo8iBbjjCdDVXAzUVYZUxVPDoJkHL8vYZC83Th5phuacCokyHRX6Ni43EpvEwnp3YPJCeT9G1FIn_GLVpl9A-MQPcWAVTnBWRGuOS3hIomZfV2HqFh1lJ118Q-wM9u1q8CQnLQvTjhxH09MEfFNfokNq2Zt5RiGHS8ai6rkcTx9KWIHWf-R04qkNqDRKg_UdTOGfqim68EhRbYP-G4Hl_6pLbLSK2cL8wPVx4ZAO5Zq4mfY_ceYvn72w2TFf6J6Nkpesp8hizJtKgIXKkKMK-1lq1OsnAF7zAUMfmXT4EDs54UPFa9WIM4IEmN5pUiNLhEvszzdECeXPflHbiWmvRDlOrIHYZGhZqKs-i9prMgQaE5UncMgGi-VDb3j0copZJU2M_XuB8lFwsCMf0cq-tJO1j5atMJSRf1PhxGa964hScfk8qlbF5XYDOCYItN0OS-o5RZpv-hEfwktiJxCCAGVqlLfV8T8zVyZllsO5oaYGyiBknsPkBf7oJi9-13cgooE9eUYIQc6huNY9i_LTcgaZFwpQDmqDtoPnqQxP7U8deKR0HQ0Y8VcAgae8xXUS6pYiroJ98AtAbQWQ8oxak4KnDuE0axJb9eJxMvNmI10AaxtwtidArExgRFiNwiyvDli6PUPZwcl8KstMLRCXLdOEZQp3bXSMjZmWQ3XWG_DvdMckGdUm4zFRl02Mi2YvGsH0mrmU2Igzzx7Qft2WVvQujzGiuKPTIH-uE88zm0ddgjmGxM4kC7lIfCYf7O1P7y9epETUXYJI-NtRfTQ8DVEihlh4s3Huy6aVyTmXX05wF0gpOXo8LPqzPMsMYGKaUz9gApsHJkv-knHJyG8qRVlHamGuFVkqnxd45kDgKBPKOVZFuJLJBrTqDPao1FVuAQc7YhuaTD3xmQO9PmRKUXyLNDDDtkqXMrb7Kwxn6iyzy-iDO50YUtrSFgVX3Nz9Cr8orvqrrmqrE-w2GakCwcO0US1TfthZKHK-WyeiqnXHkLMZa4PtSheRHL6m78YFl3TWsMhbIXAWco9n8xS7sUxFKgcuR44V_JZWf-k1x6TsFcYgEQRJUq0KRpaTgASD9r5zutF9_I0w1LOESx8OyZP5rPixFFQXg6dtZ_wY0Tde4u_CDeAl773tG8azAY_Vvz91Bib99sPnPV9MMVHxaaRBAH7xCZGn5kbDr1rQWfbaInoONSaBU6eLkT5sBOzmFqjcavvugWcDYqFXoiCtO_Og0OI5wojdpdyCCCFKFnr0vlfFPTGIP-S_ktNPk2bgDk4wZS8Y1pgaI7j8dXSyrrpqlvOeYuiO3CSC2WWxOTg84B1nrMCBGhbc_PXrvCkJLN2fisuZEdRwVOcqobjvvwAbgyoS533Zxn3m8sxiQPa9_JkVmGdpYwfCtPSMEmlFF62IV5FI7IgGb3qdrmagcfNPjPma-O3wRcalJYYXNOh8Q09PZQl05JnHtaRt-FA9pqZk8MGBGbVOynwZOsg-Psu_1k4-xXZdbPQ49ze_VKFxWICwosz1C4bzzQFz__vRgGtunHJW9Tc3AEqeZg_PkvQWaJoRNwrbVlJG-xpM1SwYqpoXpwWg7PcrYtH4cWUcRXbXOTx-50dlp3qmd9bTnHRUAy6z5jV_6mbDn68W_jrNQNC28khfzPyRZDXd9Y0ylTFERiN5cSwqK9u-bCmn9Nz6VEmPkH7j9tv4H1wBc0sfCEib7KBixTmoXvyR9WTb0CnfLu7qMZpG_z9pvbxJkFTYGMPSQuNR1nb-tZkF7SLwtaM4V0VD56Q8eq8JHFg5Pj88b_ONypiRpJfAyLwATVkz5rNoE09PfT938ZEyA3Hs15luhCWMdv6MQepzurfTjKdXoxH6W-xq9njfAtP-EEOwqj8cY1lDSD1C9GrAMuZWuZzinOc1xyzGdRxdQ5ZDY2Y1hfKyR63D2ibaThgakzXZqLIdCVbfWu5FfcZHqo1Z9m5DDAObK5ha0ncDxP3XfVX8Fkme9Rha0MHIxtHbYRcaM_j-VawnhPRwWFv1WmJn1g8mebwzGYxXJWKfB3ik5qJgZSaINgdkSBLqwtNp6MHnrD2-QtSdEV0FBbGJPgpjYMgck6E3OMDrZNL-xHt7hwc40Brg2iBAy_m-F6Ch1jdzlJrj9Dd8bU20Lg5-dAKLiIVtRHiVbawIQ--VWebwfMwpesB9HrlOqzpGoNKU8ipyRVSAnLJkLyd9HiFwRI2vw4KsTvRbBGmyyjxRAzrlXexeQ50M6WPXCIf3SLbsTm1q8U1SjZcu7ifdqOu7fIvxA7Yl3GZ42h2hwi9F-fYUXlUC9nDyg5JlTwXKhaWHcbuaHJLHFpHsRvTgth-40AAbMJ31G_hSlkuHwjfYEaTLBt7kT3aD7YVRlgnOBP48aGPqlh1zVqUprXKmW6hkleSJ8P_EABnRSnw3Xf1VlOjV1mm9oPTFA5FVeTGvMizJxcwGJQy_z8VOvcIYqTlPb0Xwvansl9qnK9YlXPd0LS-zNsoeoHIqS55N1C0EyBdxJrmpyUMHOA1t93nqe13szdG2bLhyQDJxsleYZXY7augZpZmaFGFHzJfdmHJqMeduCznYNL9ms5JRbJ33sJVkFw0s_Ua9x18stiaq9KPc9kSEZZp-EatPJY3EFfpbEEmQyzEcFMa1yH5tQiPMicA5TF5wpDIZIMu0kPh1cKvigilT94nILpbUuuOuPw_oIlTYzuiUUOupOdvaGMjPJfrxMkapO0ILpdcwbGKiVS1yDtS6F6gzEnWvPn00N5qoyCQBO94DP5e43XjUHRfr5RnwURMfCw_vRFFCqlaEqwYBOKfW0LVY8wiyfWjzJDBW6VUa_Cm1nyIfo0HI6OS-Xhv7NCVb2VFMP3tp6QkEqWjVAfqj6YzZtmHTsuLuOI2gfDAW1QUR4YF4k5C1WVSV0MnvFpQbVvZa32EKPYF_hUl2ib6SnHqHMD59CAFhUICBTV6wkeIGvWYJGuPi03qMvwiK59GydrSSuFVu3LVgUysNp36D8kRLUWZO0GaWzuLYNRpWJaVcRV6fK5KnEo7xFkcxdpP84cGGzVMjfZUDIT3abAiVYF3iDf_5Y0ogAvmlGKoFHVozElDmBohy4RiHsGLeW45MewoLmBIj9eo1jqF9s6jXJtOBfnCQMuOPUQE2vDf15uwoonwNi0tQP9ObyjyLPrj47wEiUYBQpmbVK5u3HvW2ux60PF85SEAzI3KQYcGFbgPfgijgWw4-40ACva2bskL2Kbjkap0vb2btOHCkUKaCtd-m_qNiTk0OwLO9S4Tp7D6eHln1OyQSSVoZBXQDvfzGVj4g__EOb4_Kl4m5ewyRwQZ4pEEA1H-RoVmcuoRCBvPyWqZNF1xMxm6DaBhMUXK5kXCRPSMv5STfDb7Mkh968rw1C5UxLEHOGvVj3Sem1xwmjtuCSJHr6X0lCS1gJD67DeEWGLOt7lNH9MIoEFmsuwYO8WTi8bS0Nxsgb5JCg4tmuJMlnHzM00L9M5odK0kwMyuG_-jNhkz7mNNDrCDINpT8-LmMQaLBQsWBZCchWh0LxxxH0HmimjJU4iTqBEaZF7-sSvDFjNEi8PVsNLd3_VE-wLr0812UyKGuFALZq1pleAIRoF-_9Jb1-VwExNzbxoOqZEUKzSINiIbjXuUMMWTIXlCjk1qmeAlb9U0J4y6Ljp5m9cq5R61HoHZ11yZsynDRpOaMYbzl2Pj_WYLmRfChEiVTMVUB1PkA5kMe0veXU9ehsPDm0dDenbXdhuZaJK8nnZLsDQckQkxx3kteUGQFNhwf-8ttPcqe9UHsiSniq88Oz2kRSrSwXYS93LobLuUtnx2zz3iAuvCFiuFD7MNmbZn6d8O8A0wAEZUYU6XGyvHgoNdCrHEbPIXLBn_Uri5WgZknj7JzrQKt1rlcPK7dJpf10n2AhIbHOptc4sS5IPqCoIVJJ9BboUYTeLpMehYvk9DJQY5GtMxelOIK_N-Vt1vltpHUXQrTjLQFQJD6Ax_pmtsHfVHmMudmjj_4gq7t_md9twXWcsLLOm8d9OSjJtGmZQd7RR3jPEgRivEydaU9b8EsYUUM5xfiXr-wIpYCllftEF_vIoq56jpHDDE53fzJNbroAgz3OCEXMvZNpjTkP8XlOwLLK25Jpv3McneW4wQxcLGsVnuhTTz5CsJRmUkszBZcNvuVkw1lSnvc5oOj9wqVi1kVAVahxP9f9goMJNxwz4jr7OiE-s1Hj2yrsW3qZXavTijYv-pinToY4Gtt9dq_oT-OjoC3_wczYn30BDVwqNNi2NQ_IsA7i0lSNluoxnDMpf87KhwHnGlXK42j9p1S70kNlcfdSHfNpErka_ZWq0slozSO4kZn9Lowp9PyJvgTOEsMdJxOAhKpIllZbChST0dRmQvlDHvVvZXZNmhgK6j7QKXDnVvEvFKAO1eeFbHbEtKWW1E644NCRgRzO6NMThedcAYqXAe7-mM-_ymi1IMTQfRDhMZ5N-oZD7vZDufZAJPMN9cfcDzh2autz5TOaAnIl8m2vBU5hVcBrUTZAj9qOD3WEpZs2prj2RO7zuVYJOo_uOZSewn--JvkSKfZZvzaj5Q_OzzlwCC_-qfITJ4UUbLbg6JJPWg9lfGQx5ePEao10e38Gt-S5HsZLRUkmU0_0q-RrMTu-cxR7jkkwq46c-hzBryqYLfra4RSXjitE5nVvllXXgE16IwRRymY2RXr-_KvqMbYbtLfMvqTWocBUOS75FJZvm8ALJO3NtvQV05uXERCYNG5-TTT-B11z9VrxuK5JXHp9jPqhxkuVKYCKjQLELVYGL_TBajxTJqgd4M66fIWNcELmKTdtPBx20U-J1rR0PYca_JUgTUiudgCNbWSykEySdfSn0b7b4jCLDeNUo9TZpZH8CipsakaGGSQKVK-y2xv5vAUSJUcHRaVVHRsXq91W93qIZ40qvv0sOjtKlm0EMhhnVZ4dQqJA6eRUOPftubRkrzP6gQo1ru0w8EzCUNWx36toRYg0-YuZ2N1S9cX_BmG5ogGgJ0OrLiGpw-ZkwcXNncjrrAAZ6z02opwyw68o5oxx6wwUjQClAjhaVQqhDyw63cfw1VNvQTvnzUVNOsBwLFEctJusydVqzI1Xx-AI1j1CmYqxGl7JovL-tgWAJBOCZMf-0J02hSz1ckENA_DMKSYtSew1zF1PuJELn-CmGJIgoQ-nZc2-4SWRnyvGGgjlMYzH3IGFZ-pCrQA6ii9Mp0RHH7HbN3ySUfFJYgOmm2HtSOqrhDpwf6a-DhMJ77dUHLnDrQvIg74C3bi77phcKDase_ToOh-erROR7U1RMWWk5lf4TIwPm8ao8lwliTiDgJSumSL56u2ay8g04CzSdMySkR9EZLGTufFH1Y8hNAGDONYQOIyk-PpJba2Mrn4fcnRYwxsjRLTzfdFnI9hkcccgIwlB9sFrk1M6e4Xe1AWFZH-V4ExeLon63HB1n_JB160r2_b5lfHzY5NtcCoH6_QkuAi5o9JZp__x7Bjib4VQgHwHGKyK9iOJZFHFzyFI39mnIAFHeHd6zW2w-OM29lWqtLQ1qTDeiRDfd3R_nrBY-k5lnQv2xKKDDWBaPh3aVJTDJVOVJka3sKvQMeQITbcSiXPKBKulZqdi4hdpS66F7Frm0bVXWh6XZ_bD_NKHT5h0EK9ygD2F5DR5TeNVEWmUvh2zkYwFhe3cB_4sMqfa8n1804NG2NIk49X1qzYb7aBn2vA4oOwFmm0--9mce7HBwjzHIQZ3Q8Pt-_rcTiryCOR-z-SSkAsTqZHuzHLNcMJLOjJsGJvjxNE0LU2-9_9htckY6zYuFpvAA1kQtKZQacWR3yX-dhW61w4UVmBlUkSfWJb7u_bOrCIiHVrSgYbwWYxqw6QaepgvLwPDLzB31RJgtY-6wzdy7JgSTWj_JRYYJUViEDVDuwleZC3tS4Xruy_Xe6_UJ065HQ5LIQBrf18w2nHrCKJv3KQJEs6Q3v9LmjlTSWFxOtIC8zhFFNNxm_34gHmU4i5oBwU3gn4rrE9MIsPkOGD-d9qxfZXsjXaUZjEGQsTRmd94wjnzGFr9M2xUIcWSZ9Y-gOXqJoAKS-VWKuE0GTgyWscZFAzKAWex9zog56s-v0mQDklQeFI42RUpq1ymVXAeiAIc3kSw1brYPi6nzAK-5suVxbgJzAtiXDwGTBr7nyl4fugcU4FX5E3k1pRXdTf_q-lwjpgiofQfITBuS5PJH_iooex7-n8NodxIdYBN14f8MEmA-Jtfq5s7aocBOhuC4T66C4hJGuy6Ku_8EMAj1YdIgDYiaQpLbFAS5muiEBe58NYrlngWAh5MNrBajEQk_K4wvzZ4soOsIfxTqYnDw5bvS9YbgmqTBevzGiFC6KhlV2kyL6Orrm2DNM2uwGU2V-9nkNKtwzcPBuZxXDMghwmxFs8TBQG-rVRJdMwtt_b57RCIHsqnYmXibFRpP6VGeCCXhUnNckV5ca2Of5oeqXXoTtJg7DCdbp4HtUyvH8Ui0c3-Q6jFmyuRX-LwLkhwt9rfDyotG2gpDKCexw-KQKntlXRTqnybw4YJ-fss9YFE1SCC2WGDWAqhN6IR-IBfPDVn9PX4qczfbUi8GKrzpplBYplPhLOwUAxayw0inCrGGIvigrT4NYidW2IhvbN5ESwivR-KO6vdDRr6El9juiwiYEyUUs6vCMC_NBpQ7zzieojHy6bDn851g0Q27Vj58cjkAu69StcfyI2MT_PI_Z0ozsGdFpJR4Pq2x8H-xd6S2DgHD3ER1FNx-te7IpvBJBRZ4_q32eyKxTqDY8Ua9qzdWNS1VFLCndcSC2nR5uEArPlucW3CT1JkuRlQ4G3C32OLFuskZot5_cAynuXwGves368ssZVj9s8yUFN5xbEoLuS5ksnJZtfTA_JmvD9JtvztZ-j3NbOuJ8Wwb4g_7d3qDVaCfdDtVFot4TJ6aFW2ROHjCaKllbB29Cq1yIVa0OKX1hIiQO6M5khfvwMQtLB9L4dVP1B3lPufQesS3B92JEX_hMlOsplSvtt5yH9rS0-tCOks8gej1MQwXnd-VTJzuPP6pinVgRPvE303a3fHCaOYMdfAYHsV5YsGuYfC9xNjJeRyOifhlMiL0wtZ13SMTXzJ1b079l7hQxxNoom8ynS3IASxOQJV-SFEGhS_t5zpwZpDMzN99iGERd_37dYTstlHZ-V89b3B1WJt-yWYSOx-LxxAazgJ24uuXK1xmNQDTKyU0CRUYhCEE9fWIyHNOasbfQpM-vMe-2FijYfCNmfnyf3rvMAI1AZZ0kSpJ4G3UqUqv1N5gJJcS3XbYjDKnY-XUeBIsCbDqzLigSLMDJvGKBbAVX4MNGVXs3M8Iu1zX9lTTiRzU13iweeum7zsg_EHDM9gEvzDZxpyYS5q4H5lnQyN3CwGNxToeE7bXQcEmOAqlE4AQcS6jh3LJ13KYZIoGXHm7x8kjsoIiqOZpqZRJNdyUd2TluOQ6t73ONc59NvObvRu7ld8S-cJ5Gc7oxWr1SOjadDNUj43ed7Jd9ysDRnQeBA469kv3pSGUHCngvhHkHXcS-EeRnsN9HFmwYqVgVaroMYa2e3fBqWjiMTUnQI6fQ-7oFqQbU9Qp0dxZk_5rYe4yHltuhfNfDUw66SfoG-HnklKzq2JxPwT0BZ9gUR1eOtqXvdK6MsNlitadTYBX6C8ZwiYDB2lL4fz9-aS8j-lneHJxsjZO5GchUmoxkcDac_jioTnA7-ikJd4eRuQMBUMVub7gybW598hUgXkvnYSuhe9U6QP-g==",
+            "id": "rs_04dc1c8903820aeb016a78e29d7c008195987b6652d321fcb3",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"pattern\":\".run(arg1_1\",\"path\":\"/attempts\",\"glob\":\"attempt_02.py\",\"output_mode\":\"content\",\"max_count\":100}",
+            "call_id": "call_eBfEwx8i8SeC4hekPvl3YJfj",
+            "id": "fc_04dc1c8903820aeb016a78e2cca274819588cad8d7847ac8c7",
+            "name": "grep",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
+        "id": "resp_04dc1c8903820aeb016a78e29cb0b881959a887ad38b72545b",
+        "invalid_tool_calls": [],
+        "name": "tilesmith-kernel-optimizer",
+        "response_metadata": {
+          "created_at": 1786307228.0,
+          "id": "resp_04dc1c8903820aeb016a78e29cb0b881959a887ad38b72545b",
+          "metadata": {},
+          "model": "gpt-5.5",
+          "model_name": "gpt-5.5",
+          "model_provider": "openai",
+          "object": "response",
+          "service_tier": "default",
+          "status": "completed"
+        },
+        "tool_calls": [
+          {
+            "args": {
+              "glob": "attempt_02.py",
+              "max_count": 100,
+              "output_mode": "content",
+              "path": "/attempts",
+              "pattern": ".run(arg1_1"
+            },
+            "id": "call_eBfEwx8i8SeC4hekPvl3YJfj",
+            "name": "grep",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": {
+          "input_token_details": {
+            "cache_creation": 0,
+            "cache_read": 117120
+          },
+          "input_tokens": 119082,
+          "output_token_details": {
+            "reasoning": 2608
+          },
+          "output_tokens": 2656,
+          "total_tokens": 121738
+        }
+      },
+      "type": "ai"
+    },
+    {
+      "data": {
+        "additional_kwargs": {},
+        "artifact": null,
+        "content": "/attempts/attempt_02.py:\n  14192:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_1.run(arg1_1, buf2, 512, stream=raw_stream0)\n  14196:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_2.run(arg1_1, buf6, 512, stream=raw_stream0)\n  14200:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_3.run(arg1_1, buf10, 512, stream=raw_stream0)\n  14204:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_4.run(arg1_1, buf14, 512, stream=raw_stream0)\n  14208:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_5.run(arg1_1, buf18, 512, stream=raw_stream0)\n  14212:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_6.run(arg1_1, buf99, 512, stream=raw_stream0)\n  14216:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_7.run(arg1_1, buf103, 512, stream=raw_stream0)\n  14220:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_8.run(arg1_1, buf108, 512, stream=raw_stream0)\n  14224:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_9.run(arg1_1, buf112, 512, stream=raw_stream0)\n  14228:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_10.run(arg1_1, buf116, 512, stream=raw_stream0)\n  14232:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_11.run(arg1_1, buf120, 512, stream=raw_stream0)\n  14236:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_12.run(arg1_1, buf125, 512, stream=raw_stream0)\n  14240:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_13.run(arg1_1, buf129, 512, stream=raw_stream0)\n  14244:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_14.run(arg1_1, buf133, 512, stream=raw_stream0)\n  14248:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_15.run(arg1_1, buf137, 512, stream=raw_stream0)\n  14252:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_16.run(arg1_1, buf142, 512, stream=raw_stream0)\n  14256:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_17.run(arg1_1, buf146, 512, stream=raw_stream0)\n  14260:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_18.run(arg1_1, buf150, 512, stream=raw_stream0)\n  14264:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_19.run(arg1_1, buf154, 512, stream=raw_stream0)\n  14268:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_20.run(arg1_1, buf159, 512, stream=raw_stream0)\n  14272:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_21.run(arg1_1, buf163, 512, stream=raw_stream0)\n  14276:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_22.run(arg1_1, buf167, 512, stream=raw_stream0)\n  14280:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_23.run(arg1_1, buf171, 512, stream=raw_stream0)\n  14284:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_24.run(arg1_1, buf176, 512, stream=raw_stream0)\n  14288:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_25.run(arg1_1, buf180, 512, stream=raw_stream0)\n  14292:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_26.run(arg1_1, buf184, 512, stream=raw_stream0)\n  14296:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_27.run(arg1_1, buf188, 512, stream=raw_stream0)\n  14300:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_28.run(arg1_1, buf193, 512, stream=raw_stream0)\n  14304:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_29.run(arg1_1, buf197, 512, stream=raw_stream0)\n  14308:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_30.run(arg1_1, buf201, 512, stream=raw_stream0)\n  14312:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_31.run(arg1_1, buf205, 512, stream=raw_stream0)\n  14316:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_32.run(arg1_1, buf210, 512, stream=raw_stream0)\n  14320:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_33.run(arg1_1, buf214, 512, stream=raw_stream0)\n  14324:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_34.run(arg1_1, buf218, 512, stream=raw_stream0)\n  14328:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_35.run(arg1_1, buf222, 512, stream=raw_stream0)\n  14332:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_36.run(arg1_1, buf227, 512, stream=raw_stream0)\n  14336:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_37.run(arg1_1, buf231, 512, stream=raw_stream0)\n  14340:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_38.run(arg1_1, buf235, 512, stream=raw_stream0)\n  14344:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_39.run(arg1_1, buf23, 512, stream=raw_stream0)\n  14348:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_40.run(arg1_1, buf239, 512, stream=raw_stream0)\n  14352:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_41.run(arg1_1, buf244, 512, stream=raw_stream0)\n  14356:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_42.run(arg1_1, buf248, 512, stream=raw_stream0)\n  14360:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_43.run(arg1_1, buf252, 512, stream=raw_stream0)\n  14364:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_44.run(arg1_1, buf256, 512, stream=raw_stream0)\n  14368:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_45.run(arg1_1, buf261, 512, stream=raw_stream0)\n  14372:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_46.run(arg1_1, buf265, 512, stream=raw_stream0)\n  14376:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_47.run(arg1_1, buf268, 512, stream=raw_stream0)\n  14380:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_48.run(arg1_1, buf27, 512, stream=raw_stream0)\n  14384:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_49.run(arg1_1, buf31, 512, stream=raw_stream0)\n  14388:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_50.run(arg1_1, buf35, 512, stream=raw_stream0)\n  14392:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_51.run(arg1_1, buf40, 512, stream=raw_stream0)\n  14396:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_52.run(arg1_1, buf44, 512, stream=raw_stream0)\n  14400:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_53.run(arg1_1, buf48, 512, stream=raw_stream0)\n  14404:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_54.run(arg1_1, buf52, 512, stream=raw_stream0)\n  14408:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_55.run(arg1_1, buf57, 512, stream=raw_stream0)\n  14412:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_56.run(arg1_1, buf61, 512, stream=raw_stream0)\n  14416:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_57.run(arg1_1, buf65, 512, stream=raw_stream0)\n  14420:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_58.run(arg1_1, buf69, 512, stream=raw_stream0)\n  14424:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_59.run(arg1_1, buf74, 512, stream=raw_stream0)\n  14428:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_60.run(arg1_1, buf78, 512, stream=raw_stream0)\n  14432:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_61.run(arg1_1, buf82, 512, stream=raw_stream0)\n  14436:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_62.run(arg1_1, buf86, 512, stream=raw_stream0)\n  14440:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_63.run(arg1_1, buf91, 512, stream=raw_stream0)\n  14444:             triton_poi_fused_clone_expand_mul_select_unsqueeze_view_64.run(arg1_1, buf95, 512, stream=raw_stream0)",
+        "id": "6e8f2c17-05e9-4f1a-b8c2-7efe6b4f8918",
+        "name": "grep",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "call_eBfEwx8i8SeC4hekPvl3YJfj",
+        "type": "tool"
+      },
+      "type": "tool"
+    }
+  ],
+  "model_call_limit_reached": true,
+  "model_calls": 24
+}

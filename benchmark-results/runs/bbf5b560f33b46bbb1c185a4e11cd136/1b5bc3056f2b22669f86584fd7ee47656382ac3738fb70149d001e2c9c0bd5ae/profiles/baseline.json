@@ -1,0 +1,5 @@
+{
+  "chip": "NVIDIA L4 (sm_89)",
+  "reference": "torch_inductor_generated",
+  "score": 1.0
+}

@@ -1,4 +1,4 @@
-"""Run the Tilesmith workload suite on one Modal L4 GPU and save local charts."""
+"""Run Tilesmith workload cases on Modal L4 GPUs and save local charts."""
 
 import json
 import os
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import modal
 
-from benchmark_suite import write_artifacts
+from benchmark_suite import WORKLOAD_NAMES, write_artifacts
 
 ROOT = Path(__file__).resolve().parent
 SKILL_ROOT = Path.home() / ".codex" / "skills"
@@ -60,7 +60,7 @@ EVIDENCE_VOLUME = modal.Volume.from_name("tilesmith-benchmark-evidence", create_
 CLIPROXY_AUTH_VOLUME = modal.Volume.from_name("tilesmith-cliproxyapi-auth", create_if_missing=True)
 
 
-# run_suite places every workload and loop count on one shared L4 software stack.
+# run_suite places the requested workloads and loop counts on one L4 software stack.
 @APP.function(
     image=IMAGE,
     gpu="L4",
@@ -72,14 +72,19 @@ CLIPROXY_AUTH_VOLUME = modal.Volume.from_name("tilesmith-cliproxyapi-auth", crea
         "/root/.cli-proxy-api": CLIPROXY_AUTH_VOLUME,
     },
 )
-def run_suite(agent_model, loops, max_model_calls, max_output_tokens):
+def run_suite(agent_model, loops, max_model_calls, max_output_tokens, workload_names=None):
     """Execute the CUDA suite and return its JSON-serializable evidence."""
     from benchmark_suite import run_suite as run_cuda_suite
 
     os.environ["TILESMITH_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
     # Commit even after a fatal suite error so the last partial agent trace survives container teardown.
     try:
-        result = run_cuda_suite(agent_model, loops=tuple(loops), max_model_calls=max_model_calls)
+        result = run_cuda_suite(
+            agent_model,
+            loops=tuple(loops),
+            max_model_calls=max_model_calls,
+            workload_names=tuple(workload_names) if workload_names is not None else None,
+        )
     finally:
         EVIDENCE_VOLUME.commit()
         CLIPROXY_AUTH_VOLUME.commit()
@@ -148,7 +153,7 @@ def _download_evidence(result, output_dir):
 def main(
     agent_model: str = "gpt-5.5",
     loops: str = "1,2,3",
-    max_model_calls: int = 24,
+    max_model_calls: int = None,
     max_output_tokens: int = 8_192,
     output_dir: str = "benchmark-results",
 ):
@@ -156,7 +161,25 @@ def main(
     if max_output_tokens < 1:
         raise ValueError("max_output_tokens must be a positive integer")
     _require_cliproxy_configuration()
-    result = json.loads(run_suite.remote(agent_model, _parse_loops(loops), max_model_calls, max_output_tokens))
+    arguments = [
+        (agent_model, (loop_count,), max_model_calls, max_output_tokens, (workload,))
+        for loop_count in _parse_loops(loops)
+        for workload in WORKLOAD_NAMES
+    ]
+    responses = []
+    # Isolate and submit every case together so a preemption retries only that case without blocking later loops.
+    for response in run_suite.starmap(arguments, order_outputs=True):
+        responses.append(json.loads(response))
+    metadata_keys = ("agent_model", "gpu", "cuda", "torch", "max_model_calls")
+    metadata = {key: responses[0][key] for key in metadata_keys}
+    results = [case for response in responses for case in response["results"]]
+    workload_order = {name: index for index, name in enumerate(WORKLOAD_NAMES)}
+    results.sort(key=lambda case: (workload_order[case["workload"]], case["loops"]))
+    result = {
+        **metadata,
+        "execution": "one durable Modal L4 call per workload and loop count",
+        "results": results,
+    }
     downloaded = _download_evidence(result, output_dir)
     for value in result["results"]:
         if value.get("tilesmith_run_id") in downloaded:

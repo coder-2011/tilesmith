@@ -1,4 +1,4 @@
-"""Benchmark Tilesmith on MoE, CNN, and explicit recurrent inference workloads."""
+"""Benchmark Tilesmith on MoE, CNN, RNN, and KDA inference workloads."""
 
 import copy
 import dataclasses
@@ -7,6 +7,8 @@ import json
 import math
 import statistics
 from pathlib import Path
+
+WORKLOAD_NAMES = ("moe_transformer", "mnist_cnn", "attention_rnn", "kimi_delta_attention")
 
 
 # _benchmark interleaves models to limit clock and cache-order bias in CUDA timings.
@@ -163,11 +165,53 @@ def _workloads(torch):
             weights = functional.softmax(self.attention(states), dim=1)
             return self.classifier((states * weights).sum(dim=1))
 
+    class KimiDeltaAttention(nn.Module):
+        """Run the official FLA pure-PyTorch KDA reference recurrence."""
+
+        def forward(self, query, key, value, gate, beta):
+            """Return KDA outputs for normalized queries, keys, and log-space gates."""
+            dtype = value.dtype
+            batch, sequence, heads, key_width = query.shape
+            value_heads = value.shape[2]
+            value_width = value.shape[-1]
+            groups = value_heads // heads
+            query = query.float().repeat_interleave(groups, dim=2) * key_width**-0.5
+            key = key.float().repeat_interleave(groups, dim=2)
+            value = value.float()
+            gate = gate.float()
+            beta = beta.float()
+            state = key.new_zeros(batch, value_heads, key_width, value_width).to(query)
+            output = torch.zeros_like(value)
+            # Adapted from FLA's MIT-licensed fla/ops/kda/naive.py reference so TorchInductor sees the recurrence.
+            for step in range(sequence):
+                query_step = query[:, step]
+                key_step = key[:, step]
+                value_step = value[:, step]
+                gate_step = gate[:, step]
+                beta_step = beta[:, step]
+                state = state * gate_step[..., None].exp()
+                prediction = (key_step[..., None] * state).sum(-2)
+                update = torch.einsum("bhk,bhv->bhkv", beta_step[..., None] * key_step, value_step - prediction)
+                state = state + update
+                output[:, step] = torch.einsum("bhk,bhkv->bhv", query_step, state)
+            return output.to(dtype)
+
+    # _kda_inputs matches the normalized inputs used by FLA's official KDA reference tests.
+    def _kda_inputs():
+        """Create one representative grouped-value KDA input batch on CUDA."""
+        query = functional.normalize(torch.rand(2, 64, 2, 64, device=device), dim=-1)
+        key = functional.normalize(torch.rand(2, 64, 2, 64, device=device), dim=-1)
+        value = torch.rand(2, 64, 4, 64, device=device)
+        gate = functional.logsigmoid(torch.randn(2, 64, 4, 64, device=device))
+        beta = torch.randn(2, 64, 4, device=device).sigmoid()
+        return query, key, value, gate, beta
+
     device = torch.device("cuda:0")
     return {
         "moe_transformer": (MoETransformer, lambda: (torch.randint(0, 2_048, (8, 128), device=device),)),
         "mnist_cnn": (MnistCNN, lambda: (torch.randn(256, 1, 28, 28, device=device),)),
         "attention_rnn": (AttentionRNN, lambda: (torch.randint(0, 8_192, (64, 32), device=device),)),
+        "kimi_delta_attention": (KimiDeltaAttention, _kda_inputs),
     }
 
 
@@ -238,9 +282,9 @@ def _run_case(torch, tilesmith, name, factory, inputs, agent_model, loops, max_m
     return result
 
 
-# run_suite keeps all workloads on one GPU so software, driver, and clocks are shared.
-def run_suite(agent_model, loops=(1, 2, 3), max_model_calls=24):
-    """Run every workload and return JSON-serializable timing evidence."""
+# run_suite keeps the requested workloads on one GPU so software, driver, and clocks are shared.
+def run_suite(agent_model, loops=(1, 2, 3), max_model_calls=None, workload_names=None):
+    """Run all or selected workloads and return JSON-serializable timing evidence."""
     import torch
 
     import tilesmith
@@ -251,11 +295,19 @@ def run_suite(agent_model, loops=(1, 2, 3), max_model_calls=24):
         raise ValueError("loops must contain positive integers")
     if max_model_calls is not None and (not isinstance(max_model_calls, int) or max_model_calls < 1):
         raise ValueError("max_model_calls must be None or a positive integer")
+    workloads = _workloads(torch)
+    if workload_names is not None:
+        if isinstance(workload_names, str) or not workload_names:
+            raise ValueError("workload_names must be None or a non-empty sequence")
+        unknown = set(workload_names).difference(workloads)
+        if unknown:
+            raise ValueError(f"unknown workloads: {', '.join(sorted(unknown))}")
+        workloads = {name: workloads[name] for name in workload_names}
     torch.manual_seed(7)
     torch.cuda.manual_seed_all(7)
     torch.backends.cudnn.benchmark = True
     results = []
-    for name, (factory, input_factory) in _workloads(torch).items():
+    for name, (factory, input_factory) in workloads.items():
         for loop_count in loops:
             inputs = input_factory()
             print(f"benchmarking {name} with loops={loop_count}", flush=True)
@@ -326,14 +378,14 @@ def _write_latency_chart(results, output):
                 y = bottom - height
                 shapes.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="18" height="{height:.1f}" fill="{colors[key]}" rx="2"/>')
                 shapes.append(f'<text x="{x + 9:.1f}" y="{y - 5:.1f}" text-anchor="middle" class="small">{latency:.2f}</text>')
-    output.write_text(_svg(1_140, 455, shapes), encoding="utf-8")
+    output.write_text(_svg(max(1_140, 75 + len(names) * 355), 455, shapes), encoding="utf-8")
 
 
 # _write_speedup_chart renders Tilesmith's measured speedup against TorchInductor.
 def _write_speedup_chart(results, output):
     """Write the Tilesmith-versus-TorchInductor speedup chart."""
     names = tuple(dict.fromkeys(value["workload"] for value in results))
-    colors = dict(zip(names, ("#7c3aed", "#ea580c", "#0891b2"), strict=False))
+    colors = dict(zip(names, ("#7c3aed", "#ea580c", "#0891b2", "#ca8a04"), strict=False))
     left, top, right, bottom = 90, 95, 830, 410
     finite = [value["tilesmith_vs_torch_compile"] for value in results if value["tilesmith_vs_torch_compile"] is not None]
     if not finite:

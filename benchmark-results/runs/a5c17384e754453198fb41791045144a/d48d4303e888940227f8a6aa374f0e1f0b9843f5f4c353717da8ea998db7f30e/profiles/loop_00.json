@@ -1,0 +1,72 @@
+{
+  "accepted": true,
+  "attempt_path": "/attempts/attempt_02.py",
+  "benchmark_iterations": 100,
+  "benchmark_samples": 7,
+  "candidate_evaluation": {
+    "benchmark_iterations": 100,
+    "benchmark_samples": 7,
+    "candidate_ms": 0.9553510284423828,
+    "candidate_samples_ms": [
+      0.9553510284423828,
+      0.9489612579345703,
+      0.9496575927734375,
+      0.9541324615478516,
+      0.9570304107666016,
+      0.9615974426269531,
+      0.9692160034179688
+    ],
+    "chip": "NVIDIA L4 (sm_89)",
+    "reference": "torch_inductor_generated",
+    "score": 0.9110983035773089,
+    "torch_inductor_ms": 1.0472332763671874,
+    "torch_inductor_samples_ms": [
+      1.05670654296875,
+      1.0463744354248048,
+      1.0401894378662109,
+      1.0472332763671874,
+      1.037649917602539,
+      1.0575667572021485,
+      1.056768035888672
+    ],
+    "warmup": 25
+  },
+  "candidate_ms": 1.011957778930664,
+  "candidate_samples_ms": [
+    1.0081791687011719,
+    1.0057920074462892,
+    1.011957778930664,
+    1.0035609436035156,
+    1.0171186828613281,
+    1.029048309326172,
+    1.0176000213623047
+  ],
+  "chip": "NVIDIA L4 (sm_89)",
+  "correct": true,
+  "current_best_score": 0.9116203184226294,
+  "improvement_vs_baseline": 0.08837968157737064,
+  "improvement_vs_best": 0.08837968157737064,
+  "lower_is_better": true,
+  "minimum_improvement": 0.02,
+  "progress": {
+    "loop": 1,
+    "loops": 3,
+    "percent": 33.333333333333336,
+    "status": "loop_complete"
+  },
+  "reference": "torch_inductor_generated",
+  "requested_chip": "NVIDIA L4 (sm_89)",
+  "score": 0.9116203184226294,
+  "source_sha256": "80bd286726269eb70aa94e58d924ee46f4b10309fea7a995660d4abfbafd3506",
+  "torch_inductor_ms": 1.109043197631836,
+  "torch_inductor_samples_ms": [
+    1.1059200286865234,
+    1.1071180725097656,
+    1.109043197631836,
+    1.1150540924072265,
+    1.1078348541259766,
+    1.1133235168457032,
+    1.1237068939208985
+  ],
+  "warmup": 25
+}

@@ -1,62 +1,68 @@
 {
-  "agent_model": "openai/gpt-5.5",
+  "agent_model": "gpt-5.5",
   "cuda": "13.0",
-  "diagnostic_source": "Recovered from the original Modal console output; structured traces were not enabled.",
+  "execution": "one durable Modal L4 call per workload and loop count",
   "gpu": "NVIDIA L4",
-  "max_model_calls": 24,
+  "max_model_calls": null,
   "results": [
     {
       "loops": 1,
-      "tilesmith_benchmarks": [],
-      "tilesmith_diagnostics": [
+      "tilesmith_benchmarks": [
         {
-          "kind": "failed",
-          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+          "cache_key": "9e52ab4fccef06f52e9ff55f4c4603c740035f6e7a4220899f9122389c32878b",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.1010744111524895,
+          "tilesmith_ms": 0.9429277038574219,
+          "torch_inductor_ms": 1.0382335662841797
         }
       ],
-      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
-      "tilesmith_status": "failed",
-      "tilesmith_vs_pytorch_base": null,
-      "tilesmith_vs_torch_compile": null,
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/6bfd9c79b84d4c4f8456958f9a6dfe06",
+      "tilesmith_run_id": "6bfd9c79b84d4c4f8456958f9a6dfe06",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 1.6035700920738067,
+      "tilesmith_vs_torch_compile": 1.0008476278432064,
       "timings": {
         "pytorch_base": {
-          "median_ms": 0.9468412780761719,
+          "median_ms": 0.9879756927490234,
           "samples_ms": [
-            0.95351806640625,
-            0.9495654296875,
-            0.9438003540039063,
-            0.9468412780761719,
-            0.9421517181396485,
-            0.9497907257080078,
-            0.9458175659179687
+            0.971743392944336,
+            0.9717247772216797,
+            0.9879756927490234,
+            0.972257308959961,
+            1.002782745361328,
+            0.9926758575439453,
+            1.0003046417236328
           ]
         },
         "tilesmith": {
-          "median_ms": 0.6441267395019531,
+          "median_ms": 0.6161100769042969,
           "samples_ms": [
-            0.640215072631836,
-            0.6414736175537109,
-            0.6465023803710938,
-            0.6441267395019531,
-            0.6452735900878906,
-            0.6438502502441407,
-            0.6467584228515625
+            0.6047423934936523,
+            0.615393295288086,
+            0.6161100769042969,
+            0.6152499389648437,
+            0.6375628662109375,
+            0.6315929412841796,
+            0.616703987121582
           ]
         },
         "torch_compile": {
-          "median_ms": 0.605296630859375,
+          "median_ms": 0.6166323089599609,
           "samples_ms": [
-            0.6045491027832032,
-            0.6477311706542969,
-            0.6004937744140625,
-            0.644505615234375,
-            0.6052761459350586,
-            0.6449356842041015,
-            0.605296630859375
+            0.5919116973876953,
+            0.6419353485107422,
+            0.5872332763671875,
+            0.6505983734130859,
+            0.6166323089599609,
+            0.6514892578125,
+            0.5967667388916016
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 1.5642599509134654,
+      "torch_compile_vs_pytorch_base": 1.6022120125612402,
       "workload": "moe_transformer"
     },
     {
@@ -65,106 +71,114 @@
       "tilesmith_diagnostics": [
         {
           "kind": "failed",
-          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+          "message": "APIStatusError: Error code: 408 - {'error': {'message': 'stream error: stream disconnected before completion: stream closed before response.completed', 'type': 'invalid_request_error'}}"
         }
       ],
-      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_error": "APIStatusError: Error code: 408 - {'error': {'message': 'stream error: stream disconnected before completion: stream closed before response.completed', 'type': 'invalid_request_error'}}",
+      "tilesmith_evidence_path": "runs/4403945798ed4551b24f6a113453a0d3",
+      "tilesmith_run_id": "4403945798ed4551b24f6a113453a0d3",
       "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
         "pytorch_base": {
-          "median_ms": 0.9376041412353515,
+          "median_ms": 1.3079449462890624,
           "samples_ms": [
-            0.9456025695800782,
-            0.9438822174072266,
-            0.9368576049804688,
-            0.9376041412353515,
-            0.9365401458740235,
-            0.9427865600585937,
-            0.9375212860107421
+            1.2811366271972657,
+            1.3034188842773438,
+            1.3184819030761719,
+            1.3101773071289062,
+            1.3403340148925782,
+            1.3053439331054688,
+            1.3079449462890624
           ]
         },
         "tilesmith": {
-          "median_ms": 0.6437990570068359,
+          "median_ms": 0.7625523376464843,
           "samples_ms": [
-            0.6425804901123047,
-            0.6401126098632812,
-            0.6467382049560547,
-            0.6417305755615235,
-            0.6465740966796875,
-            0.6437990570068359,
-            0.6468300628662109
+            0.7625523376464843,
+            0.762767333984375,
+            0.7630950164794922,
+            0.762449951171875,
+            0.7622246551513672,
+            0.7588249969482422,
+            0.7701503753662109
           ]
         },
         "torch_compile": {
-          "median_ms": 0.6115737533569336,
+          "median_ms": 0.7712255859375,
           "samples_ms": [
-            0.6103039932250977,
-            0.6449868774414063,
-            0.6097407913208008,
-            0.6410332489013671,
-            0.6115737533569336,
-            0.6450688171386719,
-            0.6067814254760742
+            0.7620198059082032,
+            0.7712255859375,
+            0.7822029113769531,
+            0.7683891296386719,
+            0.7733657836914063,
+            0.7661055755615235,
+            0.7824896240234375
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 1.5331006866936887,
+      "torch_compile_vs_pytorch_base": 1.6959304386914598,
       "workload": "moe_transformer"
     },
     {
       "loops": 3,
-      "tilesmith_benchmarks": [],
-      "tilesmith_diagnostics": [
+      "tilesmith_benchmarks": [
         {
-          "kind": "failed",
-          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+          "cache_key": "d48d4303e888940227f8a6aa374f0e1f0b9843f5f4c353717da8ea998db7f30e",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.1035444412387208,
+          "tilesmith_ms": 0.9699533081054688,
+          "torch_inductor_ms": 1.0703865814208984
         }
       ],
-      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
-      "tilesmith_status": "failed",
-      "tilesmith_vs_pytorch_base": null,
-      "tilesmith_vs_torch_compile": null,
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/a5c17384e754453198fb41791045144a",
+      "tilesmith_run_id": "a5c17384e754453198fb41791045144a",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 1.5739199407111752,
+      "tilesmith_vs_torch_compile": 0.9704174679215489,
       "timings": {
         "pytorch_base": {
-          "median_ms": 0.9656934356689453,
+          "median_ms": 0.9916108703613281,
           "samples_ms": [
-            0.9746739196777344,
-            0.9655388641357422,
-            0.9645362854003906,
-            0.96648193359375,
-            0.9659085083007812,
-            0.9656934356689453,
-            0.9623859405517579
+            0.9366937255859376,
+            1.056727066040039,
+            1.0427699279785156,
+            1.0320076751708984,
+            0.9916108703613281,
+            0.9809613037109375,
+            0.979343032836914
           ]
         },
         "tilesmith": {
-          "median_ms": 0.6471167755126953,
+          "median_ms": 0.6300262451171875,
           "samples_ms": [
-            0.6471167755126953,
-            0.6438502502441407,
-            0.6458051300048828,
-            0.6444032287597656,
-            0.6488486480712891,
-            0.6474240112304688,
-            0.647198715209961
+            0.6275379180908203,
+            0.6300262451171875,
+            0.6132735824584961,
+            0.6316128158569336,
+            0.633180160522461,
+            0.6324736022949219,
+            0.6293401718139648
           ]
         },
         "torch_compile": {
-          "median_ms": 0.6089728164672852,
+          "median_ms": 0.6113884735107422,
           "samples_ms": [
-            0.6003916931152343,
-            0.6443923187255859,
-            0.6085324859619141,
-            0.6418841552734375,
-            0.6089728164672852,
-            0.6441165161132812,
-            0.6046003341674805
+            0.6113884735107422,
+            0.6469001770019531,
+            0.5763174438476563,
+            0.6503731536865235,
+            0.6061772918701172,
+            0.6535270690917969,
+            0.6016409683227539
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 1.5857742900102398,
+      "torch_compile_vs_pytorch_base": 1.6218998449009938,
       "workload": "moe_transformer"
     },
     {
@@ -173,323 +187,512 @@
       "tilesmith_diagnostics": [
         {
           "kind": "failed",
-          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+          "message": "APIStatusError: Error code: 408 - {'error': {'message': 'stream error: stream disconnected before completion: stream closed before response.completed', 'type': 'invalid_request_error'}}"
         }
       ],
-      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
+      "tilesmith_error": "APIStatusError: Error code: 408 - {'error': {'message': 'stream error: stream disconnected before completion: stream closed before response.completed', 'type': 'invalid_request_error'}}",
+      "tilesmith_evidence_path": "runs/77e28bf00fc44be7982b772dd96b7e50",
+      "tilesmith_run_id": "77e28bf00fc44be7982b772dd96b7e50",
       "tilesmith_status": "failed",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
         "pytorch_base": {
-          "median_ms": 2.783006591796875,
+          "median_ms": 2.8737945556640625,
           "samples_ms": [
-            2.765322265625,
-            2.77939208984375,
-            2.7761050415039064,
-            2.783006591796875,
-            2.832967529296875,
-            2.8306121826171875,
-            2.7991046142578124
+            2.8542974853515624,
+            2.8670770263671876,
+            2.871797790527344,
+            2.9032241821289064,
+            2.93064697265625,
+            2.929715270996094,
+            2.8737945556640625
           ]
         },
         "tilesmith": {
-          "median_ms": 1.8630450439453126,
+          "median_ms": 1.960202178955078,
           "samples_ms": [
-            1.8404249572753906,
-            1.910661163330078,
-            1.9111013793945313,
-            1.8759782409667969,
-            1.8630450439453126,
-            1.8556825256347655,
-            1.862512664794922
+            1.9462655639648438,
+            2.023434295654297,
+            1.9960319519042968,
+            1.960202178955078,
+            1.9370803833007812,
+            1.949501495361328,
+            1.9775180053710937
           ]
         },
         "torch_compile": {
-          "median_ms": 1.8647244262695313,
+          "median_ms": 1.9665203857421876,
           "samples_ms": [
-            1.839534149169922,
-            1.915248565673828,
-            1.8848768615722655,
-            1.857689666748047,
-            1.8804531860351563,
-            1.8647244262695313,
-            1.8602700805664063
+            1.9373977661132813,
+            1.9990631103515626,
+            1.994967041015625,
+            1.93833984375,
+            1.9665203857421876,
+            2.0108595275878907,
+            1.9533824157714843
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 1.4924492609154105,
+      "torch_compile_vs_pytorch_base": 1.4613601651423813,
       "workload": "mnist_cnn"
     },
     {
       "loops": 2,
-      "tilesmith_benchmarks": [],
-      "tilesmith_diagnostics": [
+      "tilesmith_benchmarks": [
         {
-          "kind": "failed",
-          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+          "cache_key": "25e6430255fe8fd0e35225c744eff80a934e1861001fa98b018e8b4a7c11fb41",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.2019254654347395,
+          "tilesmith_ms": 1.5491891479492188,
+          "torch_inductor_ms": 1.8620098876953124
         }
       ],
-      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
-      "tilesmith_status": "failed",
-      "tilesmith_vs_pytorch_base": null,
-      "tilesmith_vs_torch_compile": null,
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/7c309ac8ffdb4911b19b0fa5ade94c06",
+      "tilesmith_run_id": "7c309ac8ffdb4911b19b0fa5ade94c06",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 1.7812191387565341,
+      "tilesmith_vs_torch_compile": 1.2020998578919668,
       "timings": {
         "pytorch_base": {
-          "median_ms": 2.8059951782226564,
+          "median_ms": 2.821241455078125,
           "samples_ms": [
-            2.7618612670898437,
-            2.8059951782226564,
-            2.7759103393554687,
-            2.7930828857421877,
-            2.834708557128906,
-            2.834114685058594,
-            2.8146893310546877
+            2.7967181396484375,
+            2.821241455078125,
+            2.7935028076171875,
+            2.804193420410156,
+            2.854625244140625,
+            2.8379135131835938,
+            2.858506164550781
           ]
         },
         "tilesmith": {
-          "median_ms": 1.882572784423828,
+          "median_ms": 1.5838822937011718,
           "samples_ms": [
-            1.860771484375,
-            1.9334748840332032,
-            1.9164151000976561,
-            1.9055923461914062,
-            1.8777191162109375,
-            1.874687957763672,
-            1.882572784423828
+            1.5498445129394531,
+            1.631068115234375,
+            1.6349183654785155,
+            1.6140902709960938,
+            1.5838822937011718,
+            1.5677133178710938,
+            1.578260498046875
           ]
         },
         "torch_compile": {
-          "median_ms": 1.8824703979492188,
+          "median_ms": 1.9039846801757812,
           "samples_ms": [
-            1.854740447998047,
-            1.9342643737792968,
-            1.8897906494140626,
-            1.8824703979492188,
-            1.9121868896484375,
-            1.8793052673339843,
-            1.8766233825683594
+            1.87325439453125,
+            1.9715890502929687,
+            1.9179827880859375,
+            1.8943487548828124,
+            1.9492147827148438,
+            1.8941746520996094,
+            1.9039846801757812
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 1.4905919271185004,
+      "torch_compile_vs_pytorch_base": 1.4817563840995087,
       "workload": "mnist_cnn"
     },
     {
       "loops": 3,
-      "tilesmith_benchmarks": [],
-      "tilesmith_diagnostics": [
+      "tilesmith_benchmarks": [
         {
-          "kind": "failed",
-          "message": "OpenRouter HTTP 402: insufficient credits for the requested response budget"
+          "cache_key": "241e7121b65ffb1df8a39c10f115ec664fbdc8bc765aea6e9032abde5867b057",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.1822905433401476,
+          "tilesmith_ms": 1.7128038024902343,
+          "torch_inductor_ms": 2.02503173828125
         }
       ],
-      "tilesmith_error": "OpenRouter HTTP 402: insufficient credits for the requested response budget",
-      "tilesmith_status": "failed",
-      "tilesmith_vs_pytorch_base": null,
-      "tilesmith_vs_torch_compile": null,
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/495e8df11d034364a51df212367de415",
+      "tilesmith_run_id": "495e8df11d034364a51df212367de415",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 1.7339379175241563,
+      "tilesmith_vs_torch_compile": 1.2025601813788176,
       "timings": {
         "pytorch_base": {
-          "median_ms": 2.7931854248046877,
+          "median_ms": 2.97248779296875,
           "samples_ms": [
-            2.7682705688476563,
-            2.7922842407226565,
-            2.7777227783203124,
-            2.7931854248046877,
-            2.8283392333984376,
-            2.8364901733398438,
-            2.8018585205078126
+            2.934886474609375,
+            2.954332275390625,
+            2.9433242797851564,
+            2.989588623046875,
+            3.002849426269531,
+            2.993070068359375,
+            2.97248779296875
           ]
         },
         "tilesmith": {
-          "median_ms": 1.8832485961914063,
+          "median_ms": 1.714298858642578,
           "samples_ms": [
-            1.8575865173339843,
-            1.9311923217773437,
-            1.9193232727050782,
-            1.8889932250976562,
-            1.8819993591308595,
-            1.8762136840820312,
-            1.8832485961914063
+            1.6907264709472656,
+            1.7863270568847656,
+            1.7424281311035157,
+            1.708380126953125,
+            1.7109811401367188,
+            1.714298858642578,
+            1.7317376708984376
           ]
         },
         "torch_compile": {
-          "median_ms": 1.8942463684082032,
+          "median_ms": 2.0615475463867186,
           "samples_ms": [
-            1.8588262939453124,
-            1.934714813232422,
-            1.9051008605957032,
-            1.875230712890625,
-            1.8942463684082032,
-            1.8986495971679687,
-            1.875404815673828
+            2.0205976867675783,
+            2.083737640380859,
+            2.098206787109375,
+            2.0436172485351562,
+            2.058260498046875,
+            2.062540740966797,
+            2.0615475463867186
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 1.4745629034262804,
+      "torch_compile_vs_pytorch_base": 1.4418720529529574,
       "workload": "mnist_cnn"
     },
     {
       "loops": 1,
-      "tilesmith_benchmarks": [],
-      "tilesmith_diagnostics": [
+      "tilesmith_benchmarks": [
         {
-          "kind": "ineligible",
-          "message": "no eligible TorchInductor CUDA graph reached Tilesmith"
+          "cache_key": "a023b549de8489c620380676c928926803f121e0a41c44e9ea33ebc36c50d865",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.0324901353288543,
+          "tilesmith_ms": 2.754949035644531,
+          "torch_inductor_ms": 2.844457702636719
         }
       ],
-      "tilesmith_error": "no eligible TorchInductor CUDA graph reached Tilesmith",
-      "tilesmith_status": "ineligible",
-      "tilesmith_vs_pytorch_base": null,
-      "tilesmith_vs_torch_compile": null,
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/575f8062579f4be39ab2158c45a79700",
+      "tilesmith_run_id": "575f8062579f4be39ab2158c45a79700",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 1.789410509122064,
+      "tilesmith_vs_torch_compile": 1.0319871726755991,
       "timings": {
         "pytorch_base": {
-          "median_ms": 2.870589294433594,
+          "median_ms": 2.4128102111816405,
           "samples_ms": [
-            2.8817510986328125,
-            2.8673330688476564,
-            2.8696063232421873,
-            2.870589294433594,
-            2.8692276000976564,
-            2.87162353515625,
-            2.8720742797851564
+            2.4039219665527343,
+            2.4232138061523436,
+            2.420828094482422,
+            2.4122572326660157,
+            2.4128102111816405,
+            2.5867059326171873,
+            2.407966766357422
           ]
         },
         "tilesmith": {
-          "median_ms": 2.9188198852539062,
+          "median_ms": 1.3483827209472656,
           "samples_ms": [
-            2.9244821166992185,
-            2.923294677734375,
-            2.9157781982421875,
-            2.9129318237304687,
-            2.9188198852539062,
-            2.9170355224609374,
-            2.919239807128906
+            1.3424838256835938,
+            1.3404774475097656,
+            1.3554489135742187,
+            1.3447987365722656,
+            1.350830078125,
+            1.3483827209472656,
+            1.3520281982421876
           ]
         },
         "torch_compile": {
-          "median_ms": 2.9199563598632814,
+          "median_ms": 1.391513671875,
           "samples_ms": [
-            2.9469058227539064,
-            2.9224557495117187,
-            2.9205206298828124,
-            2.9199563598632814,
-            2.9182565307617185,
-            2.91786865234375,
-            2.9178778076171876
+            1.3858201599121094,
+            1.3927935791015624,
+            1.39504638671875,
+            1.3909504699707032,
+            1.391513671875,
+            1.3904794311523438,
+            1.4022560119628906
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 0.9830932180671361,
-      "workload": "attention_lstm"
+      "torch_compile_vs_pytorch_base": 1.7339464641626487,
+      "workload": "attention_rnn"
     },
     {
       "loops": 2,
-      "tilesmith_benchmarks": [],
-      "tilesmith_diagnostics": [
+      "tilesmith_benchmarks": [
         {
-          "kind": "ineligible",
-          "message": "no eligible TorchInductor CUDA graph reached Tilesmith"
+          "cache_key": "aa20828df362d7710d8a683676de70e3375e3bcad56ff2fa551b9ac61137d897",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.081660350479726,
+          "tilesmith_ms": 2.2004925537109377,
+          "torch_inductor_ms": 2.380185546875
         }
       ],
-      "tilesmith_error": "no eligible TorchInductor CUDA graph reached Tilesmith",
-      "tilesmith_status": "ineligible",
-      "tilesmith_vs_pytorch_base": null,
-      "tilesmith_vs_torch_compile": null,
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/d24c4b327c2b44aa9c8d333301715701",
+      "tilesmith_run_id": "d24c4b327c2b44aa9c8d333301715701",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 2.3593065684448016,
+      "tilesmith_vs_torch_compile": 1.1048521131908047,
       "timings": {
         "pytorch_base": {
-          "median_ms": 2.8790682983398437,
+          "median_ms": 1.938053741455078,
           "samples_ms": [
-            2.8790682983398437,
-            2.8749615478515627,
-            2.8726681518554686,
-            2.8968243408203125,
-            2.8935052490234376,
-            2.8850592041015624,
-            2.876897888183594
+            1.9738418579101562,
+            1.938053741455078,
+            1.9545907592773437,
+            1.9419772338867187,
+            1.929001007080078,
+            1.93115966796875,
+            1.9360768127441406
           ]
         },
         "tilesmith": {
-          "median_ms": 2.9232025146484375,
+          "median_ms": 0.8214505767822265,
           "samples_ms": [
-            2.9202511596679686,
-            2.921195373535156,
-            2.92070556640625,
-            3.0387503051757814,
-            2.943692932128906,
-            2.94498291015625,
-            2.9232025146484375
+            0.8298802947998047,
+            0.834510726928711,
+            0.8201433563232422,
+            0.8175411224365234,
+            0.8214505767822265,
+            0.8157695770263672,
+            0.8226509094238281
           ]
         },
         "torch_compile": {
-          "median_ms": 2.9242059326171876,
+          "median_ms": 0.9075814056396484,
           "samples_ms": [
-            2.9184494018554688,
-            2.9242059326171876,
-            2.9195077514648435,
-            3.093348388671875,
-            2.94223876953125,
-            2.9454736328125,
-            2.9234072875976564
+            0.9348607635498047,
+            0.9331097412109375,
+            0.9112358093261719,
+            0.8965017700195312,
+            0.9068339538574218,
+            0.9075814056396484,
+            0.9062604522705078
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 0.9845641396955428,
-      "workload": "attention_lstm"
+      "torch_compile_vs_pytorch_base": 2.1354048567017188,
+      "workload": "attention_rnn"
     },
     {
       "loops": 3,
-      "tilesmith_benchmarks": [],
-      "tilesmith_diagnostics": [
+      "tilesmith_benchmarks": [
         {
-          "kind": "ineligible",
-          "message": "no eligible TorchInductor CUDA graph reached Tilesmith"
+          "cache_key": "59085723e568ddeb4f28e708328f13cff7e1c5b471a216ddd2c34aeab7d26295",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.0744456356416825,
+          "tilesmith_ms": 2.556231689453125,
+          "torch_inductor_ms": 2.746531982421875
         }
       ],
-      "tilesmith_error": "no eligible TorchInductor CUDA graph reached Tilesmith",
-      "tilesmith_status": "ineligible",
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/a07993ef3f4c4037a12ee72f23e017aa",
+      "tilesmith_run_id": "a07993ef3f4c4037a12ee72f23e017aa",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 1.8794151666172434,
+      "tilesmith_vs_torch_compile": 1.0558932583565135,
+      "timings": {
+        "pytorch_base": {
+          "median_ms": 2.263910369873047,
+          "samples_ms": [
+            2.251171875,
+            2.261248016357422,
+            2.27230712890625,
+            2.263910369873047,
+            2.2604800415039064,
+            2.2657740783691405,
+            2.269634552001953
+          ]
+        },
+        "tilesmith": {
+          "median_ms": 1.2045823669433593,
+          "samples_ms": [
+            1.2116070556640626,
+            1.21565185546875,
+            1.2042546844482422,
+            1.2018073272705079,
+            1.2045823669433593,
+            1.200343017578125,
+            1.2069376373291016
+          ]
+        },
+        "torch_compile": {
+          "median_ms": 1.271910400390625,
+          "samples_ms": [
+            1.2623155212402344,
+            1.2696268463134766,
+            1.2801126098632813,
+            1.2705996704101563,
+            1.2762012481689453,
+            1.271910400390625,
+            1.2800204467773437
+          ]
+        }
+      },
+      "torch_compile_vs_pytorch_base": 1.7799291280091445,
+      "workload": "attention_rnn"
+    },
+    {
+      "loops": 1,
+      "tilesmith_benchmarks": [],
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 16116 / 32768 (49.2%)\nGreatest absolute difference: 0.1383233368396759 at index (0, 55, 3, 20) (up to 0.0001 allowed)\nGreatest relative difference: 22.049165725708008 at index (0, 48, 1, 42) (up to 0.001 allowed)",
+      "tilesmith_status": "error",
       "tilesmith_vs_pytorch_base": null,
       "tilesmith_vs_torch_compile": null,
       "timings": {
         "pytorch_base": {
-          "median_ms": 3.0714373779296875,
+          "median_ms": 17.9342236328125,
           "samples_ms": [
-            3.0727166748046875,
-            3.0772222900390624,
-            3.0766281127929687,
-            3.0714373779296875,
-            3.06766845703125,
-            3.0699212646484373,
-            3.069020080566406
-          ]
-        },
-        "tilesmith": {
-          "median_ms": 3.1336550903320313,
-          "samples_ms": [
-            3.1298153686523436,
-            3.1338189697265624,
-            3.1398590087890623,
-            3.1308389282226563,
-            3.1336550903320313,
-            3.1296392822265626,
-            3.1412237548828124
+            17.9342236328125,
+            17.31962890625,
+            17.557032470703124,
+            18.60347900390625,
+            19.52126953125,
+            18.786375732421874,
+            17.765068359375
           ]
         },
         "torch_compile": {
-          "median_ms": 3.137198181152344,
+          "median_ms": 3.23810302734375,
           "samples_ms": [
-            3.137198181152344,
-            3.138511047363281,
-            3.1459011840820312,
-            3.136543884277344,
-            3.141374206542969,
-            3.1320269775390623,
-            3.1367474365234376
+            3.0657638549804687,
+            3.03740966796875,
+            3.160954895019531,
+            3.418664855957031,
+            4.2775244140625,
+            3.9761102294921873,
+            3.23810302734375
           ]
         }
       },
-      "torch_compile_vs_pytorch_base": 0.9790383649914965,
-      "workload": "attention_lstm"
+      "torch_compile_vs_pytorch_base": 5.538496916672887,
+      "workload": "kimi_delta_attention"
+    },
+    {
+      "loops": 2,
+      "tilesmith_benchmarks": [
+        {
+          "cache_key": "5ea584dd3bc997d1f06c45b4fa667af2f62362f95a56d8210022c5c70c8ee0f0",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 5.542153554023612,
+          "tilesmith_ms": 1.3461605834960937,
+          "torch_inductor_ms": 7.460628662109375
+        }
+      ],
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/6a02d21ce71c4ae88054b4cf0d0560ad",
+      "tilesmith_run_id": "6a02d21ce71c4ae88054b4cf0d0560ad",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 11.855290470759158,
+      "tilesmith_vs_torch_compile": 2.4114881984931893,
+      "timings": {
+        "pytorch_base": {
+          "median_ms": 18.07424560546875,
+          "samples_ms": [
+            18.2961865234375,
+            18.135941162109376,
+            18.07424560546875,
+            19.523922119140625,
+            17.90361572265625,
+            17.98170654296875,
+            17.59214599609375
+          ]
+        },
+        "tilesmith": {
+          "median_ms": 1.5245721435546875,
+          "samples_ms": [
+            1.5348326110839843,
+            1.5245721435546875,
+            1.5577906799316406,
+            1.5488613891601561,
+            1.4106008911132812,
+            1.4000332641601563,
+            1.411092529296875
+          ]
+        },
+        "torch_compile": {
+          "median_ms": 3.6764877319335936,
+          "samples_ms": [
+            3.6764877319335936,
+            3.687301025390625,
+            3.7419009399414063,
+            3.8417510986328125,
+            3.489177551269531,
+            3.4152032470703126,
+            3.4270208740234374
+          ]
+        }
+      },
+      "torch_compile_vs_pytorch_base": 4.91617188015554,
+      "workload": "kimi_delta_attention"
+    },
+    {
+      "loops": 3,
+      "tilesmith_benchmarks": [
+        {
+          "cache_key": "1b5bc3056f2b22669f86584fd7ee47656382ac3738fb70149d001e2c9c0bd5ae",
+          "cached": false,
+          "chip": "NVIDIA L4 (sm_89)",
+          "speedup": 1.089292051655111,
+          "tilesmith_ms": 6.731375732421875,
+          "torch_inductor_ms": 7.33243408203125
+        }
+      ],
+      "tilesmith_diagnostics": [],
+      "tilesmith_error": null,
+      "tilesmith_evidence_path": "runs/bbf5b560f33b46bbb1c185a4e11cd136",
+      "tilesmith_run_id": "bbf5b560f33b46bbb1c185a4e11cd136",
+      "tilesmith_status": "optimized",
+      "tilesmith_vs_pytorch_base": 5.7499926039713305,
+      "tilesmith_vs_torch_compile": 1.2151236442569378,
+      "timings": {
+        "pytorch_base": {
+          "median_ms": 17.201121826171875,
+          "samples_ms": [
+            16.966778564453126,
+            17.62356201171875,
+            17.274122314453123,
+            17.305784912109374,
+            17.05018310546875,
+            17.027799072265626,
+            17.201121826171875
+          ]
+        },
+        "tilesmith": {
+          "median_ms": 2.9915032958984376,
+          "samples_ms": [
+            2.8796826171875,
+            2.9915032958984376,
+            3.1032730102539063,
+            3.0955316162109376,
+            2.9152972412109377,
+            2.897940368652344,
+            3.0885272216796875
+          ]
+        },
+        "torch_compile": {
+          "median_ms": 3.63504638671875,
+          "samples_ms": [
+            3.36859130859375,
+            3.63504638671875,
+            3.641773986816406,
+            3.652444152832031,
+            3.415787658691406,
+            3.4005093383789062,
+            3.655884094238281
+          ]
+        }
+      },
+      "torch_compile_vs_pytorch_base": 4.73202264736402,
+      "workload": "kimi_delta_attention"
     }
   ],
   "torch": "2.13.0+cu130"
